@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/compound-cli",
+    "crates/compound-fs",
+    "crates/compound-policy",
+    "crates/compound-runtime",
+    "crates/compound-tcp",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/compound/compound"
+
+[workspace.dependencies]
+hex = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "1"

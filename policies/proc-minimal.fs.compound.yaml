@@ -1,0 +1,33 @@
+# Reusable Compound filesystem policy fragment for conservative procfs reads.
+# This fragment assumes Compound has mounted a procfs view scoped to the jail.
+
+version: 1
+
+metadata:
+  name: proc-minimal
+  description: Minimal read-only procfs entries commonly needed by Linux tools.
+
+policy:
+  default: inherit
+
+  paths:
+    - path: /proc/self
+      access: [read, list]
+
+    - path: /proc/thread-self
+      access: [read, list]
+
+    - path: /proc/cpuinfo
+      access: [read]
+
+    - path: /proc/meminfo
+      access: [read]
+
+    - path: /proc/stat
+      access: [read]
+
+    - path: /proc/uptime
+      access: [read]
+
+    - path: /proc/filesystems
+      access: [read]

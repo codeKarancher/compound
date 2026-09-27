@@ -1,0 +1,41 @@
+# Example Compound filesystem policy for a coding agent.
+
+version: 1
+
+metadata:
+  name: github-coding-agent-fs
+  description: Workspace-write filesystem profile for local coding-agent runs.
+
+include:
+  - path: ./policies/proc-minimal.fs.compound.yaml
+    digest: sha256:REPLACE_WITH_PINNED_DIGEST
+
+policy:
+  default: deny
+
+  paths:
+    - path: /workspace
+      access: [read, list, write, create, delete, rename]
+
+    - path: /inputs
+      access: [read, list]
+
+    - path: /outputs
+      access: [read, list, write, create, delete, rename]
+
+    - path: /tmp
+      access: [read, list, write, create, delete, rename]
+
+    - path: /usr
+      access: [read, list, execute]
+
+    - path: /bin
+      access: [read, list, execute]
+
+    - path: /lib
+      access: [read, list, execute]
+
+    - path: /lib64
+      access: [read, list, execute]
+
+  inherited_file_descriptors: deny

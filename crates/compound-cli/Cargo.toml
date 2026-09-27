@@ -1,0 +1,18 @@
+[package]
+name = "compound-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "compound"
+path = "src/main.rs"
+
+[dependencies]
+compound-fs = { path = "../compound-fs" }
+compound-runtime = { path = "../compound-runtime" }
+compound-tcp = { path = "../compound-tcp" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }

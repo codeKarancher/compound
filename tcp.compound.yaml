@@ -1,0 +1,51 @@
+# Example Compound TCP policy for a coding agent.
+
+version: 1
+
+metadata:
+  name: github-coding-agent-tcp
+  description: Gateway-only TCP egress profile for GitHub and npm access.
+
+include:
+  - path: ./policies/github-npm.tcp.compound.yaml
+    digest: sha256:REPLACE_WITH_PINNED_DIGEST
+
+tcp:
+  default: deny
+
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+
+  encrypted_hostname_unverifiable: deny
+
+  deny_cidrs:
+    - 0.0.0.0/8
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - ::1/128
+    - fc00::/7
+    - fe80::/10
+
+  allow:
+    - host: api.github.com
+      ports: [443]
+      protocol: tls
+      limits:
+        max_connections: 20
+        max_upload_bytes: 10MiB
+
+audit:
+  required: true
+  event_sink: stderr
+  include:
+    - policy_digest
+    - network_allow
+    - network_deny
+    - dns_resolution

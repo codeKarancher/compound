@@ -1,0 +1,29 @@
+# Reusable Compound TCP policy fragment for GitHub and npm.
+
+version: 1
+
+metadata:
+  name: github-npm-tcp
+  description: Common TLS destinations needed for GitHub source access and npm package installation.
+
+tcp:
+  allow:
+    - host: github.com
+      ports: [443]
+      protocol: tls
+
+    - host: api.github.com
+      ports: [443]
+      protocol: tls
+
+    - host: objects.githubusercontent.com
+      ports: [443]
+      protocol: tls
+
+    - host: codeload.github.com
+      ports: [443]
+      protocol: tls
+
+    - host: registry.npmjs.org
+      ports: [443]
+      protocol: tls

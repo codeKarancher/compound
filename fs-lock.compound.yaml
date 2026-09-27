@@ -1,0 +1,65 @@
+# Generated example lock file. Do not edit by hand.
+# Produced by resolving fs.compound.yaml includes into one filesystem policy.
+
+version: 1
+
+metadata:
+  name: github-coding-agent-fs
+  description: Workspace-write filesystem profile for local coding-agent runs.
+
+source:
+  root: fs.compound.yaml
+  includes:
+    - path: ./policies/proc-minimal.fs.compound.yaml
+      digest: sha256:REPLACE_WITH_PINNED_DIGEST
+
+policy:
+  default: deny
+
+  paths:
+    - path: /proc/self
+      access: [read, list]
+
+    - path: /proc/thread-self
+      access: [read, list]
+
+    - path: /proc/cpuinfo
+      access: [read]
+
+    - path: /proc/meminfo
+      access: [read]
+
+    - path: /proc/stat
+      access: [read]
+
+    - path: /proc/uptime
+      access: [read]
+
+    - path: /proc/filesystems
+      access: [read]
+
+    - path: /workspace
+      access: [read, list, write, create, delete, rename]
+
+    - path: /inputs
+      access: [read, list]
+
+    - path: /outputs
+      access: [read, list, write, create, delete, rename]
+
+    - path: /tmp
+      access: [read, list, write, create, delete, rename]
+
+    - path: /usr
+      access: [read, list, execute]
+
+    - path: /bin
+      access: [read, list, execute]
+
+    - path: /lib
+      access: [read, list, execute]
+
+    - path: /lib64
+      access: [read, list, execute]
+
+  inherited_file_descriptors: deny
