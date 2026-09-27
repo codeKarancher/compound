@@ -51,3 +51,4 @@ jobs:
         run: |
           cargo test -p compound-fs --test landlock_plan
           cargo test -p compound-runtime --test exec_runtime
+          cargo test -p compound-cli --test linux_landlock_enforcement
