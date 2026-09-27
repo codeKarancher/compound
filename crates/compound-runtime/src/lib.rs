@@ -2,6 +2,8 @@ mod process;
 
 #[cfg(target_os = "linux")]
 use compound_fs::apply_landlock_plan;
+#[cfg(target_os = "linux")]
+use compound_fs::InheritedFileDescriptors;
 use compound_fs::{compile_landlock_plan, FsLockDocument};
 use std::{ffi::OsString, fs, path::PathBuf, process::ExitStatus};
 use thiserror::Error;
@@ -44,6 +46,9 @@ pub fn exec(options: &ExecOptions) -> Result<ExitStatus, RuntimeError> {
     {
         process::set_no_new_privs()?;
         sanitize_environment();
+        if lock.policy.inherited_file_descriptors != Some(InheritedFileDescriptors::Allow) {
+            process::close_inherited_file_descriptors()?;
+        }
         apply_landlock_plan(&plan)?;
         process::spawn_and_wait(options)
     }

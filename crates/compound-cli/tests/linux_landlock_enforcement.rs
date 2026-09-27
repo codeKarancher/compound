@@ -1,8 +1,11 @@
 #![cfg(target_os = "linux")]
 
 use std::{
+    ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
+    fs::File,
+    os::fd::AsRawFd,
+    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::atomic::{AtomicU64, Ordering},
@@ -88,6 +91,47 @@ fn run_compound(lock: &Path, command: &str) -> Output {
         .expect("run compound")
 }
 
+fn run_compound_with_workdir(lock: &Path, workdir: &Path, command: &str) -> Output {
+    Command::new(compound_bin())
+        .arg("exec")
+        .arg("--fs-lock")
+        .arg(lock)
+        .arg("--workdir")
+        .arg(workdir)
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .expect("run compound")
+}
+
+fn run_compound_inheriting_fd(lock: &Path, command: &str, file: &File) -> Output {
+    let fd = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(flags >= 0, "F_GETFD failed");
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
+    assert_eq!(result, 0, "F_SETFD failed");
+
+    let fd_env = OsString::from_vec(fd.to_string().into_bytes());
+    let output = Command::new(compound_bin())
+        .arg("exec")
+        .arg("--fs-lock")
+        .arg(lock)
+        .arg("--")
+        .arg("/bin/sh")
+        .arg("-c")
+        .arg(command)
+        .env("COMPOUND_TEST_FD", fd_env)
+        .output()
+        .expect("run compound");
+
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, flags) };
+    assert_eq!(result, 0, "restore F_SETFD failed");
+
+    output
+}
+
 #[test]
 fn landlock_allows_write_inside_granted_directory() {
     let dir = temp_dir();
@@ -152,6 +196,46 @@ fn landlock_denies_write_outside_grants() {
 }
 
 #[test]
+fn landlock_denies_create_outside_grants() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list, write, create"));
+
+    let output = run_compound(&lock, &format!("mkdir {}", denied.join("newdir").display()));
+
+    assert!(
+        !output.status.success(),
+        "denied directory create unexpectedly succeeded"
+    );
+    assert!(!denied.join("newdir").exists());
+}
+
+#[test]
+fn landlock_denies_delete_outside_grants() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("secret"), "secret").expect("write secret");
+    let lock = write_lock(
+        &dir,
+        &path_rule(&allowed, "read, list, write, create, delete"),
+    );
+
+    let output = run_compound(&lock, &format!("rm {}", denied.join("secret").display()));
+
+    assert!(
+        !output.status.success(),
+        "denied delete unexpectedly succeeded"
+    );
+    assert!(denied.join("secret").exists());
+}
+
+#[test]
 fn landlock_denies_execute_without_execute_grant() {
     let dir = temp_dir();
     let allowed = dir.join("allowed");
@@ -184,6 +268,197 @@ fn landlock_denies_symlink_escape() {
     let output = run_compound(&lock, &format!("cat {}", allowed.join("link").display()));
 
     assert!(!output.status.success(), "symlink escape read succeeded");
+}
+
+#[test]
+fn landlock_denies_parent_traversal_escape() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("secret"), "secret").expect("write secret");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list"));
+
+    let output = run_compound(
+        &lock,
+        &format!("cat {}/../denied/secret", allowed.display()),
+    );
+
+    assert!(
+        !output.status.success(),
+        "parent traversal escape read succeeded"
+    );
+}
+
+#[test]
+fn landlock_denies_workdir_outside_grants() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("secret"), "secret").expect("write secret");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list"));
+
+    let output = run_compound_with_workdir(&lock, &denied, "cat secret");
+
+    assert!(
+        !output.status.success(),
+        "workdir outside grants allowed a read escape"
+    );
+}
+
+#[test]
+fn landlock_denies_inherited_fd_escape() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("secret"), "secret").expect("write secret");
+    let secret = File::open(denied.join("secret")).expect("open denied secret before confinement");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list"));
+
+    let output = run_compound_inheriting_fd(&lock, "cat /proc/self/fd/$COMPOUND_TEST_FD", &secret);
+
+    assert!(
+        !output.status.success(),
+        "inherited file descriptor escaped Landlock restriction"
+    );
+}
+
+#[test]
+fn landlock_denies_dev_fd_escape() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("secret"), "secret").expect("write secret");
+    let secret = File::open(denied.join("secret")).expect("open denied secret before confinement");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list"));
+
+    let output = run_compound_inheriting_fd(&lock, "cat /dev/fd/$COMPOUND_TEST_FD", &secret);
+
+    assert!(
+        !output.status.success(),
+        "/dev/fd escaped Landlock restriction"
+    );
+}
+
+#[test]
+fn landlock_separates_list_from_read() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::write(allowed.join("secret"), "secret").expect("write secret");
+    let lock = write_lock(&dir, &path_rule(&allowed, "list"));
+
+    let list_output = run_compound(&lock, &format!("ls {}", allowed.display()));
+    let read_output = run_compound(&lock, &format!("cat {}", allowed.join("secret").display()));
+
+    assert!(
+        list_output.status.success(),
+        "list grant did not allow directory enumeration"
+    );
+    assert!(
+        !read_output.status.success(),
+        "list grant allowed file content read"
+    );
+}
+
+#[test]
+fn landlock_separates_read_from_list() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let secret = allowed.join("secret");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::write(&secret, "secret").expect("write secret");
+    let lock = write_lock(&dir, &path_rule(&secret, "read"));
+
+    let read_output = run_compound(&lock, &format!("cat {}", secret.display()));
+    let list_output = run_compound(&lock, &format!("ls {}", allowed.display()));
+
+    assert!(
+        read_output.status.success(),
+        "read grant did not allow a known file read"
+    );
+    assert!(
+        !list_output.status.success(),
+        "read grant allowed parent directory listing"
+    );
+}
+
+#[test]
+fn landlock_denies_create_when_only_write_is_granted() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let existing = allowed.join("existing");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::write(&existing, "old").expect("write existing");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list, write"));
+
+    let modify_output = run_compound(&lock, &format!("printf new > {}", existing.display()));
+    let create_output = run_compound(&lock, &format!("touch {}", allowed.join("new").display()));
+
+    assert!(
+        modify_output.status.success(),
+        "write grant did not allow modifying existing file"
+    );
+    assert!(
+        !create_output.status.success(),
+        "write grant allowed creating a new file"
+    );
+    assert!(!allowed.join("new").exists());
+}
+
+#[test]
+fn landlock_denies_delete_when_only_write_is_granted() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let existing = allowed.join("existing");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::write(&existing, "old").expect("write existing");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list, write"));
+
+    let output = run_compound(&lock, &format!("rm {}", existing.display()));
+
+    assert!(
+        !output.status.success(),
+        "write grant allowed deleting an existing file"
+    );
+    assert!(existing.exists());
+}
+
+#[test]
+fn landlock_denies_rename_across_policy_boundary() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(allowed.join("file"), "data").expect("write file");
+    let lock = write_lock(
+        &dir,
+        &path_rule(&allowed, "read, list, write, create, delete, rename"),
+    );
+
+    let output = run_compound(
+        &lock,
+        &format!(
+            "mv {} {}",
+            allowed.join("file").display(),
+            denied.join("file").display()
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "rename across policy boundary succeeded"
+    );
+    assert!(allowed.join("file").exists());
+    assert!(!denied.join("file").exists());
 }
 
 #[test]

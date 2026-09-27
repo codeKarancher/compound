@@ -24,6 +24,7 @@ dependencies = [
  "compound-fs",
  "compound-runtime",
  "compound-tcp",
+ "libc",
  "serde",
  "serde_yaml",
  "thiserror",

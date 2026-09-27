@@ -2,7 +2,11 @@
 use crate::{ExecOptions, RuntimeError};
 use std::env;
 #[cfg(target_os = "linux")]
-use std::process::{Command, ExitStatus};
+use std::{
+    fs,
+    os::unix::ffi::OsStrExt,
+    process::{Command, ExitStatus},
+};
 
 pub const DANGEROUS_ENV_VARS: &[&str] = &[
     "LD_PRELOAD",
@@ -38,4 +42,34 @@ pub fn spawn_and_wait(options: &ExecOptions) -> Result<ExitStatus, RuntimeError>
         command.current_dir(workdir);
     }
     Ok(command.status()?)
+}
+
+#[cfg(target_os = "linux")]
+pub fn close_inherited_file_descriptors() -> Result<(), RuntimeError> {
+    let mut fds = Vec::new();
+    for entry in fs::read_dir("/proc/self/fd")? {
+        let entry = entry?;
+        let Some(fd) = parse_fd(entry.file_name().as_bytes()) else {
+            continue;
+        };
+        if fd > 2 {
+            fds.push(fd);
+        }
+    }
+
+    fds.sort_unstable();
+    fds.dedup();
+    for fd in fds {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_fd(bytes: &[u8]) -> Option<i32> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.parse().ok()
 }
