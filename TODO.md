@@ -17,6 +17,11 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - workdir outside grants
   - descendant process inheritance
   - `read`/`list` and `write`/`create`/`delete` separation
+  - realistic host secret fixture denial
+  - malformed lock files fail before target execution
+  - rename/link boundary behavior
+  - existing hard-link reachability is documented as a Landlock path semantics
+    limitation
 - TCP policy/schema/lock/explain/evaluator APIs exist.
 - TCP gateway code is currently an explicit CONNECT-style test harness, not
   transparent enforcement.
@@ -25,7 +30,7 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 
 ## Phase 0: Policy And CLI Foundation
 
-- [ ] Add integration tests for CLI commands, not just parser unit tests.
+- [x] Add integration tests for CLI commands, not just parser unit tests.
   - `compound fs lock`
   - `compound fs lock --check`
   - `compound fs explain`
@@ -36,7 +41,7 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - invalid lock inputs
   - output file is not written on `--check`
   - output file is not updated on validation failure
-- [ ] Test `compound exec` target exit-code propagation.
+- [x] Test `compound exec` target exit-code propagation.
 - [ ] Add `--root PATH` support for filesystem lock validation, as described in
   the proposal.
 - [ ] Add policy validation warnings/errors for paths that do not exist under
@@ -46,8 +51,11 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - broad write grants to `/`, `/usr`, `/bin`, `/etc`, `/home`
   - executable writable temp/workspace paths
   - runtime paths granted broader access than needed
-- [ ] Add validation for ambiguous or overlapping TCP rules.
-- [ ] Add validation for TCP allow rules that resolve to denied CIDRs.
+- [x] Add validation for duplicate TCP allow rule identities.
+- [x] Add validation for TCP CIDR allow rules covered by denied CIDRs.
+- [ ] Add validation for broader ambiguous or overlapping TCP rules.
+- [ ] Add validation for TCP hostname allow rules that resolve to denied CIDRs.
+- [x] Validate lock semantics before `fs explain` and `tcp explain`.
 - [ ] Improve `fs explain` and `tcp explain`.
   - Show source/include provenance.
   - Show effective lock digest.
@@ -59,15 +67,17 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 
 ## Phase 1: Landlock Runtime Hardening
 
-- [ ] Replace ordinary `File::open` for Landlock rule paths with
+- [x] Replace ordinary `File::open` for Landlock rule paths with
   `open(O_PATH | O_CLOEXEC)`.
   - Important: rule setup should not require normal read permission on the path.
   - Important: descriptors used during setup should not leak into the target.
-- [ ] Implement Landlock ABI detection and compatibility negotiation.
-  - Currently the code defines `kernel_landlock_abi` but does not use it.
+- [x] Implement initial Landlock ABI detection and compatibility negotiation.
+  - Compound now requires Landlock ABI 3 or newer.
+  - Older ABI versions fail closed.
+  - Future work may relax this by mapping policy rights to per-ABI support.
   - Fail closed if a policy requires rights unsupported by the running kernel.
   - Emit a clear compatibility error explaining which right/ABI is missing.
-- [ ] Review Landlock rights mapping against current kernel ABI.
+- [x] Review Landlock rights mapping against current kernel ABI.
   - Confirm `read`, `list`, `write`, `create`, `delete`, `rename`, `execute`.
   - Explicitly decide how to handle symlink, FIFO, Unix socket, block device,
     character device, and other make rights.
@@ -121,14 +131,15 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 
 ## Phase 1: Filesystem Adversarial Tests
 
-- [ ] Add hard-link escape tests.
+- [x] Add hard-link escape tests.
   - Hard link inside an allowed directory to data also reachable from a denied
     path.
-  - Define and document desired semantics before asserting behavior.
-- [ ] Add rename/link boundary tests in more combinations.
+  - Existing hard links inside an allowed directory are documented as readable
+    under Landlock path-reachability semantics.
+- [x] Add rename/link boundary tests in more combinations.
   - allowed to denied
   - denied to allowed
-  - allowed directory with `rename` to allowed directory without `rename`
+  - source without `rename`
   - hard-link creation across policy boundaries
 - [ ] Add Unix socket tests.
   - Can a jailed process create a Unix socket in a writable allowed directory?
@@ -143,13 +154,13 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - Existing file modification with `write`.
   - Truncate without create.
   - Append-only behavior is not currently modeled; document that.
-- [ ] Add realistic host secret denial fixtures.
+- [x] Add realistic host secret denial fixtures.
   - fake home SSH key
   - fake cloud credentials
   - fake kubeconfig
   - fake Docker config
   - fake browser profile/token file
-- [ ] Add tests for malformed/insecure locks ensuring target never runs.
+- [x] Add tests for malformed/insecure locks ensuring target never runs.
   - relative path
   - `default: inherit`
   - empty paths
