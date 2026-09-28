@@ -1,5 +1,6 @@
 use compoundd::{
-    build_network_plan, read_tcp_lock, DryRunRunner, NetworkPlanOptions, SystemRunner,
+    build_cleanup_plan, build_network_plan, read_tcp_lock, DryRunRunner, NetworkPlanOptions,
+    SystemRunner,
 };
 use std::{env, net::Ipv4Addr, path::PathBuf};
 
@@ -57,21 +58,36 @@ fn run() -> Result<(), String> {
                     .parse::<Ipv4Addr>()
                     .map_err(|err| format!("invalid --jail-addr: {err}"))?;
             }
+            "--fwmark" => {
+                options.fwmark = args
+                    .next()
+                    .ok_or_else(|| "missing --fwmark value".to_owned())?
+                    .parse()
+                    .map_err(|err| format!("invalid --fwmark: {err}"))?;
+            }
+            "--routing-table" => {
+                options.routing_table = args
+                    .next()
+                    .ok_or_else(|| "missing --routing-table value".to_owned())?
+                    .parse()
+                    .map_err(|err| format!("invalid --routing-table: {err}"))?;
+            }
             "--dry-run" => dry_run = true,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unexpected argument `{arg}`\n\n{}", usage())),
         }
     }
 
-    let lock = read_tcp_lock(&tcp_lock).map_err(|error| error.to_string())?;
-    let plan = build_network_plan(&lock, &options).map_err(|error| error.to_string())?;
-
     match command.as_str() {
         "plan" => {
+            let lock = read_tcp_lock(&tcp_lock).map_err(|error| error.to_string())?;
+            let plan = build_network_plan(&lock, &options).map_err(|error| error.to_string())?;
             println!("{}", plan.render_shell());
             Ok(())
         }
         "apply" => {
+            let lock = read_tcp_lock(&tcp_lock).map_err(|error| error.to_string())?;
+            let plan = build_network_plan(&lock, &options).map_err(|error| error.to_string())?;
             if dry_run {
                 let mut runner = DryRunRunner::default();
                 plan.apply(&mut runner).map_err(|error| error.to_string())?;
@@ -83,6 +99,20 @@ fn run() -> Result<(), String> {
             let mut runner = SystemRunner;
             plan.apply(&mut runner).map_err(|error| error.to_string())
         }
+        "cleanup" => {
+            let plan = build_cleanup_plan(&options).map_err(|error| error.to_string())?;
+            if dry_run {
+                let mut runner = DryRunRunner::default();
+                plan.cleanup(&mut runner)
+                    .map_err(|error| error.to_string())?;
+                for command in runner.commands {
+                    println!("{}", command.render_shell());
+                }
+                return Ok(());
+            }
+            let mut runner = SystemRunner;
+            plan.cleanup(&mut runner).map_err(|error| error.to_string())
+        }
         _ => Err(format!("unknown command `{command}`\n\n{}", usage())),
     }
 }
@@ -92,11 +122,14 @@ fn usage() -> String {
         "Usage:",
         "  compoundd plan [--tcp-lock tcp-lock.compound.yaml] [--jail-id ID]",
         "  compoundd apply [--tcp-lock tcp-lock.compound.yaml] [--jail-id ID] [--dry-run]",
+        "  compoundd cleanup [--jail-id ID] [--dry-run]",
         "",
         "Options:",
         "  --gateway-port PORT",
         "  --host-addr IPv4",
         "  --jail-addr IPv4",
+        "  --fwmark MARK",
+        "  --routing-table TABLE",
     ]
     .join("\n")
 }

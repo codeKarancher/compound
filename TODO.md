@@ -182,9 +182,13 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - configures routes
   - installs nftables/policy routing/TPROXY rules
   - dry-run/apply command runner
+- [x] Implement initial `compoundd` cleanup planner.
+  - removes policy route and fwmark rule for the jail routing table
+  - deletes the jail nftables table
+  - deletes the host veth and network namespace
 - [ ] Implement full `compoundd` daemon lifecycle.
   - starts or coordinates the trusted gateway
-  - manages cleanup of namespaces, veth devices, nftables tables, and routes
+  - makes setup and cleanup idempotent across partial failures
   - owns privilege separation and daemon API
   - exposes inspect/debug output for routes and firewall rules
 - [x] Decide initial transparent interception mechanism.

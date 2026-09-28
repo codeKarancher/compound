@@ -1,5 +1,5 @@
 use compound_tcp::TcpLockDocument;
-use compoundd::{build_network_plan, DryRunRunner, NetworkPlanOptions};
+use compoundd::{build_cleanup_plan, build_network_plan, DryRunRunner, NetworkPlanOptions};
 
 fn lock() -> TcpLockDocument {
     serde_yaml::from_str(
@@ -93,4 +93,45 @@ fn dry_run_runner_records_commands_without_executing() {
     plan.apply(&mut runner).expect("dry run should succeed");
 
     assert_eq!(runner.commands, plan.commands);
+}
+
+#[test]
+fn network_plan_has_cleanup_for_policy_route_nft_veth_and_namespace() {
+    let plan = build_network_plan(&lock(), &NetworkPlanOptions::new("agent-01"))
+        .expect("build network plan");
+    let cleanup = plan.render_cleanup_shell();
+
+    assert!(cleanup.contains("ip route delete local 0.0.0.0/0 dev lo table 100"));
+    assert!(cleanup.contains("ip rule delete fwmark 1 lookup 100"));
+    assert!(cleanup.contains("nft delete table inet compound_agent01"));
+    assert!(cleanup.contains("ip link delete chagent01"));
+    assert!(cleanup.contains("ip netns delete compound-agent01"));
+}
+
+#[test]
+fn cleanup_plan_does_not_need_tcp_lock() {
+    let plan =
+        build_cleanup_plan(&NetworkPlanOptions::new("agent-01")).expect("build cleanup plan");
+    let mut runner = DryRunRunner::default();
+
+    plan.cleanup(&mut runner).expect("cleanup dry run");
+
+    assert_eq!(runner.commands, plan.cleanup_commands);
+    assert!(plan.commands.is_empty());
+}
+
+#[test]
+fn network_plan_uses_custom_fwmark_and_routing_table() {
+    let mut options = NetworkPlanOptions::new("agent-01");
+    options.fwmark = 77;
+    options.routing_table = 177;
+    let plan = build_network_plan(&lock(), &options).expect("build network plan");
+    let setup = plan.render_shell();
+    let cleanup = plan.render_cleanup_shell();
+
+    assert!(setup.contains("meta mark set 77 accept"));
+    assert!(setup.contains("ip rule add fwmark 77 lookup 177"));
+    assert!(setup.contains("ip route add local 0.0.0.0/0 dev lo table 177"));
+    assert!(cleanup.contains("ip rule delete fwmark 77 lookup 177"));
+    assert!(cleanup.contains("ip route delete local 0.0.0.0/0 dev lo table 177"));
 }

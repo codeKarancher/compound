@@ -14,6 +14,8 @@ pub struct NetworkPlanOptions {
     pub host_addr: Ipv4Addr,
     pub jail_addr: Ipv4Addr,
     pub prefix_len: u8,
+    pub fwmark: u32,
+    pub routing_table: u32,
 }
 
 impl NetworkPlanOptions {
@@ -24,6 +26,8 @@ impl NetworkPlanOptions {
             host_addr: Ipv4Addr::new(10, 200, 0, 1),
             jail_addr: Ipv4Addr::new(10, 200, 0, 2),
             prefix_len: 30,
+            fwmark: 1,
+            routing_table: 100,
         }
     }
 }
@@ -36,19 +40,27 @@ pub struct NetworkPlan {
     pub jail_veth: String,
     pub gateway_addr: SocketAddrV4,
     pub commands: Vec<NetworkCommand>,
+    pub cleanup_commands: Vec<NetworkCommand>,
 }
 
 impl NetworkPlan {
     pub fn render_shell(&self) -> String {
-        self.commands
-            .iter()
-            .map(NetworkCommand::render_shell)
-            .collect::<Vec<_>>()
-            .join("\n")
+        render_commands(&self.commands)
+    }
+
+    pub fn render_cleanup_shell(&self) -> String {
+        render_commands(&self.cleanup_commands)
     }
 
     pub fn apply<R: CommandRunner>(&self, runner: &mut R) -> Result<(), NetworkError> {
         for command in &self.commands {
+            runner.run(command)?;
+        }
+        Ok(())
+    }
+
+    pub fn cleanup<R: CommandRunner>(&self, runner: &mut R) -> Result<(), NetworkError> {
+        for command in &self.cleanup_commands {
             runner.run(command)?;
         }
         Ok(())
@@ -131,6 +143,8 @@ pub fn build_network_plan(
     let jail_cidr = format!("{}/{}", options.jail_addr, options.prefix_len);
     let gateway = gateway_addr.to_string();
     let host_addr = options.host_addr.to_string();
+    let fwmark = options.fwmark.to_string();
+    let routing_table = options.routing_table.to_string();
 
     let mut commands = vec![
         cmd("ip", ["netns", "add", namespace.as_str()]),
@@ -312,11 +326,21 @@ pub fn build_network_plan(
                 "meta",
                 "mark",
                 "set",
-                "1",
+                fwmark.as_str(),
                 "accept",
             ],
         ),
-        cmd("ip", ["rule", "add", "fwmark", "1", "lookup", "100"]),
+        cmd(
+            "ip",
+            [
+                "rule",
+                "add",
+                "fwmark",
+                fwmark.as_str(),
+                "lookup",
+                routing_table.as_str(),
+            ],
+        ),
         cmd(
             "ip",
             [
@@ -327,7 +351,7 @@ pub fn build_network_plan(
                 "dev",
                 "lo",
                 "table",
-                "100",
+                routing_table.as_str(),
             ],
         ),
     ]);
@@ -344,6 +368,8 @@ pub fn build_network_plan(
         ],
     ));
 
+    let cleanup_commands = build_cleanup_commands(&namespace, &host_veth, &table, options);
+
     Ok(NetworkPlan {
         jail_id: options.jail_id.clone(),
         namespace,
@@ -351,6 +377,29 @@ pub fn build_network_plan(
         jail_veth,
         gateway_addr,
         commands,
+        cleanup_commands,
+    })
+}
+
+pub fn build_cleanup_plan(options: &NetworkPlanOptions) -> Result<NetworkPlan, NetworkError> {
+    validate_options(options)?;
+
+    let jail_key = sanitize_identifier(&options.jail_id);
+    let namespace = format!("compound-{jail_key}");
+    let host_veth = interface_name("ch", &jail_key);
+    let jail_veth = interface_name("cj", &jail_key);
+    let table = format!("compound_{jail_key}");
+    let gateway_addr = SocketAddrV4::new(options.host_addr, options.gateway_port);
+    let cleanup_commands = build_cleanup_commands(&namespace, &host_veth, &table, options);
+
+    Ok(NetworkPlan {
+        jail_id: options.jail_id.clone(),
+        namespace,
+        host_veth,
+        jail_veth,
+        gateway_addr,
+        commands: Vec::new(),
+        cleanup_commands,
     })
 }
 
@@ -381,7 +430,57 @@ fn validate_options(options: &NetworkPlanOptions) -> Result<(), NetworkError> {
             "IPv4 prefix length must be <= 32".to_owned(),
         ));
     }
+    if options.fwmark == 0 {
+        return Err(NetworkError::InvalidOptions(
+            "fwmark must be non-zero".to_owned(),
+        ));
+    }
+    if options.routing_table == 0 {
+        return Err(NetworkError::InvalidOptions(
+            "routing table must be non-zero".to_owned(),
+        ));
+    }
     Ok(())
+}
+
+fn build_cleanup_commands(
+    namespace: &str,
+    host_veth: &str,
+    table: &str,
+    options: &NetworkPlanOptions,
+) -> Vec<NetworkCommand> {
+    let fwmark = options.fwmark.to_string();
+    let routing_table = options.routing_table.to_string();
+
+    vec![
+        cmd(
+            "ip",
+            [
+                "route",
+                "delete",
+                "local",
+                "0.0.0.0/0",
+                "dev",
+                "lo",
+                "table",
+                routing_table.as_str(),
+            ],
+        ),
+        cmd(
+            "ip",
+            [
+                "rule",
+                "delete",
+                "fwmark",
+                fwmark.as_str(),
+                "lookup",
+                routing_table.as_str(),
+            ],
+        ),
+        cmd("nft", ["delete", "table", "inet", table]),
+        cmd("ip", ["link", "delete", host_veth]),
+        cmd("ip", ["netns", "delete", namespace]),
+    ]
 }
 
 fn cmd(program: &str, args: impl IntoIterator<Item = impl Into<String>>) -> NetworkCommand {
@@ -416,6 +515,14 @@ fn shell_quote(value: &str) -> String {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn render_commands(commands: &[NetworkCommand]) -> String {
+    commands
+        .iter()
+        .map(NetworkCommand::render_shell)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Error)]

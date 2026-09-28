@@ -91,6 +91,14 @@ cargo run -p compoundd -- apply \
   --dry-run
 ```
 
+Inspect the cleanup plan for the same jail:
+
+```sh
+cargo run -p compoundd -- cleanup \
+  --jail-id demo \
+  --dry-run
+```
+
 Run a command with filesystem enforcement on Linux:
 
 ```sh
@@ -222,10 +230,13 @@ Privileged network setup planning:
   - UDP, ICMP, DNS, and denied-CIDR drops
   - TCP TPROXY interception to the gateway
   - policy routing for marked transparent proxy traffic
-- supports `plan` and `apply --dry-run`
+- supports `plan`, `apply --dry-run`, and `cleanup --dry-run`
+- derives cleanup commands for policy routes, nftables tables, veth devices,
+  and namespaces
 
-This is not yet a full daemon lifecycle. The gateway process manager, cleanup
-path, privilege model, and `compound exec --tcp` integration remain open.
+This is not yet a full daemon lifecycle. The gateway process manager, privilege
+model, idempotent apply/cleanup behavior, and `compound exec --tcp` integration
+remain open.
 
 ### `compound-cli`
 
