@@ -67,6 +67,7 @@ name = "compound-tcp"
 version = "0.1.0"
 dependencies = [
  "compound-policy",
+ "libc",
  "serde",
  "serde_yaml",
  "thiserror",

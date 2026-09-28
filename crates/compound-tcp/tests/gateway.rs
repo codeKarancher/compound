@@ -1,8 +1,8 @@
 use compound_policy::{DocumentKind, LockSource, Metadata, ValidationReport};
 use compound_tcp::{
-    ByteSize, DirectPolicy, Gateway, GatewayAuditEvent, GatewayError, HostnameVerificationPolicy,
-    MemoryAuditSink, PortList, StaticResolver, TcpAllowRule, TcpDefault, TcpLimits,
-    TcpLockDocument, TcpPolicyBody, TcpProtocol,
+    original_destination, ByteSize, DirectPolicy, Gateway, GatewayAuditEvent, GatewayError,
+    HostnameVerificationPolicy, MemoryAuditSink, PortList, StaticResolver, TcpAllowRule,
+    TcpDefault, TcpLimits, TcpLockDocument, TcpPolicyBody, TcpProtocol,
 };
 use std::{
     collections::BTreeMap,
@@ -196,5 +196,44 @@ fn gateway_enforces_upload_limit() -> io::Result<()> {
     assert!(audit.events().iter().any(|event| {
         matches!(event, GatewayAuditEvent::Deny { reason, .. } if reason.starts_with("upload_limit_exceeded"))
     }));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn original_destination_reports_local_destination_on_linux() -> io::Result<()> {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if skip_if_bind_denied(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let expected = listener.local_addr()?;
+
+    let client = TcpStream::connect(expected)?;
+    let (accepted, _) = listener.accept()?;
+
+    let original = original_destination(&accepted).expect("recover original destination");
+    assert_eq!(original, expected);
+    drop(client);
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn original_destination_fails_closed_on_unsupported_platforms() -> io::Result<()> {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if skip_if_bind_denied(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let client = TcpStream::connect(listener.local_addr()?)?;
+    let (accepted, _) = listener.accept()?;
+
+    let error = original_destination(&accepted).expect_err("unsupported platform");
+    assert!(matches!(
+        error,
+        GatewayError::TransparentOriginalDestinationUnsupported
+    ));
+    drop(client);
     Ok(())
 }

@@ -9,8 +9,8 @@ pub use evaluate::{
 };
 pub use explain::{explain_lock, TcpAllowExplanation, TcpDirectExplanation, TcpExplanation};
 pub use gateway::{
-    AuditSink, Connector, Gateway, GatewayAuditEvent, GatewayError, MemoryAuditSink, Resolver,
-    StaticResolver, SystemConnector, SystemResolver,
+    original_destination, AuditSink, Connector, Gateway, GatewayAuditEvent, GatewayError,
+    MemoryAuditSink, Resolver, StaticResolver, SystemConnector, SystemResolver,
 };
 pub use lock::{lock_policy, lock_policy_from_path, TcpLockError, TcpLockOptions};
 pub use schema::{

@@ -130,6 +130,10 @@ impl Gateway {
     }
 }
 
+pub fn original_destination(stream: &TcpStream) -> Result<SocketAddr, GatewayError> {
+    platform_original_destination(stream)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayAuditEvent {
     Allow {
@@ -304,12 +308,55 @@ fn format_deny_reason(reason: Option<&TcpDenyReason>) -> String {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn platform_original_destination(stream: &TcpStream) -> Result<SocketAddr, GatewayError> {
+    use std::{
+        mem::{self, MaybeUninit},
+        net::Ipv4Addr,
+        os::fd::AsRawFd,
+    };
+
+    let mut addr = MaybeUninit::<libc::sockaddr_in>::zeroed();
+    let mut len = mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_IP,
+            libc::SO_ORIGINAL_DST,
+            addr.as_mut_ptr().cast(),
+            &mut len,
+        )
+    };
+    if result != 0 {
+        return Err(GatewayError::Io(io::Error::last_os_error()));
+    }
+    if len as usize != mem::size_of::<libc::sockaddr_in>() {
+        return Err(GatewayError::InvalidOriginalDestination(
+            "unexpected sockaddr length".to_owned(),
+        ));
+    }
+
+    let addr = unsafe { addr.assume_init() };
+    let ip = IpAddr::V4(Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)));
+    let port = u16::from_be(addr.sin_port);
+    Ok(SocketAddr::new(ip, port))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_original_destination(_stream: &TcpStream) -> Result<SocketAddr, GatewayError> {
+    Err(GatewayError::TransparentOriginalDestinationUnsupported)
+}
+
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("invalid gateway request: {0}")]
     InvalidRequest(String),
+    #[error("invalid original destination: {0}")]
+    InvalidOriginalDestination(String),
+    #[error("transparent original destination lookup is only supported on Linux")]
+    TransparentOriginalDestinationUnsupported,
     #[error("upload limit exceeded: {limit} bytes")]
     UploadLimitExceeded { limit: u64 },
 }

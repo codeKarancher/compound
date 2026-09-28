@@ -196,8 +196,12 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - packet marks
   - policy routing
   - original destination recovery
-- [ ] Prove transparent sockets/original destination recovery against the real
-  gateway implementation.
+- [x] Implement low-level Linux original-destination recovery helper.
+  - uses `SO_ORIGINAL_DST`
+  - fails closed as unsupported on non-Linux hosts
+  - has Linux CI smoke coverage on an accepted TCP socket
+- [ ] Prove TPROXY-redirected original destination recovery against the real
+  transparent gateway path.
 - [ ] Implement per-jail gateway lifecycle.
   - bind listener outside jailed privilege domain
   - associate gateway instance with immutable policy digest
