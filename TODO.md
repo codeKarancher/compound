@@ -24,10 +24,11 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
     limitation
   - rename target-create behavior is documented as a Landlock semantics nuance
 - TCP policy/schema/lock/explain/evaluator APIs exist.
-- TCP gateway code is currently an explicit CONNECT-style test harness, not
-  transparent enforcement.
-- `compound exec --tcp` is intentionally rejected until `compoundd` and real
-  gateway enforcement exist.
+- TCP gateway code is currently an explicit CONNECT-style test harness.
+- `compoundd` can build and dry-run a namespace/veth/nftables/TPROXY network
+  setup plan from a `tcp-lock`.
+- `compound exec --tcp` is intentionally rejected until privileged `compoundd`
+  lifecycle management and workload launch are wired together.
 
 ## Phase 0: Policy And CLI Foundation
 
@@ -174,20 +175,25 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 
 ## Phase 2: TCP Enforcement
 
-- [ ] Design and implement `compoundd`.
+- [x] Design and implement initial `compoundd` network setup planner.
   - privileged setup component
   - creates network namespace
   - creates veth pair
   - configures routes
   - installs nftables/policy routing/TPROXY rules
+  - dry-run/apply command runner
+- [ ] Implement full `compoundd` daemon lifecycle.
   - starts or coordinates the trusted gateway
+  - manages cleanup of namespaces, veth devices, nftables tables, and routes
+  - owns privilege separation and daemon API
   - exposes inspect/debug output for routes and firewall rules
-- [ ] Decide transparent interception mechanism.
+- [x] Decide initial transparent interception mechanism.
   - TPROXY
   - packet marks
   - policy routing
-  - transparent sockets
   - original destination recovery
+- [ ] Prove transparent sockets/original destination recovery against the real
+  gateway implementation.
 - [ ] Implement per-jail gateway lifecycle.
   - bind listener outside jailed privilege domain
   - associate gateway instance with immutable policy digest

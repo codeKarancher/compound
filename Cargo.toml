@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/compound-cli",
+    "crates/compoundd",
     "crates/compound-fs",
     "crates/compound-policy",
     "crates/compound-runtime",
