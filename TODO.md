@@ -200,6 +200,10 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - uses `SO_ORIGINAL_DST`
   - fails closed as unsupported on non-Linux hosts
   - has Linux CI smoke coverage on an accepted TCP socket
+- [x] Implement initial raw transparent gateway handler.
+  - recovers or accepts the original IP/port
+  - allows only policy decisions enforceable without a claimed hostname
+  - denies hostname-only policy until SNI/or hostname verification exists
 - [ ] Prove TPROXY-redirected original destination recovery against the real
   transparent gateway path.
 - [ ] Implement per-jail gateway lifecycle.

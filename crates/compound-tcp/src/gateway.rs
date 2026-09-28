@@ -128,6 +128,67 @@ impl Gateway {
             }
         })
     }
+
+    pub fn handle_transparent_client(&self, client: TcpStream) -> Result<(), GatewayError> {
+        let destination = original_destination(&client)?;
+        self.handle_transparent_client_with_destination(client, destination)
+    }
+
+    pub fn handle_transparent_client_with_destination(
+        &self,
+        client: TcpStream,
+        destination: SocketAddr,
+    ) -> Result<(), GatewayError> {
+        let destination_label = destination.to_string();
+        let evaluation = evaluate_connection(
+            &self.policy,
+            &ConnectionRequest {
+                destination_ip: destination.ip(),
+                requested_hostname: None,
+                port: destination.port(),
+                protocol: TcpProtocol::Tcp,
+            },
+        );
+
+        if evaluation.decision == ConnectionDecision::Deny {
+            self.audit.record(GatewayAuditEvent::Deny {
+                host: destination_label,
+                port: destination.port(),
+                reason: format_deny_reason(evaluation.reason.as_ref()),
+            });
+            return Ok(());
+        }
+
+        let rule_index = evaluation.rule_index.expect("allow has rule index");
+        let mut upstream = self.connector.connect(
+            &destination.ip().to_string(),
+            destination.port(),
+            destination.ip(),
+        )?;
+        self.audit.record(GatewayAuditEvent::Allow {
+            host: destination_label.clone(),
+            port: destination.port(),
+            ip: destination.ip(),
+            rule_index,
+        });
+
+        let max_upload_bytes = self.policy.tcp.allow[rule_index]
+            .limits
+            .as_ref()
+            .and_then(|limits| limits.max_upload_bytes)
+            .map(|bytes| bytes.as_u64());
+        proxy(client, &mut upstream, max_upload_bytes).map_err(|error| match error {
+            ProxyError::Io(error) => GatewayError::Io(error),
+            ProxyError::UploadLimitExceeded { limit } => {
+                self.audit.record(GatewayAuditEvent::Deny {
+                    host: destination_label,
+                    port: destination.port(),
+                    reason: format!("upload_limit_exceeded:{limit}"),
+                });
+                GatewayError::UploadLimitExceeded { limit }
+            }
+        })
+    }
 }
 
 pub fn original_destination(stream: &TcpStream) -> Result<SocketAddr, GatewayError> {

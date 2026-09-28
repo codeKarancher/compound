@@ -62,6 +62,40 @@ fn policy(max_upload_bytes: Option<u64>) -> TcpLockDocument {
     }
 }
 
+fn cidr_policy() -> TcpLockDocument {
+    TcpLockDocument {
+        version: 1,
+        kind: Some(DocumentKind::TcpLock),
+        metadata: Metadata {
+            name: "transparent-gateway-test".to_owned(),
+            description: None,
+            labels: BTreeMap::new(),
+        },
+        source: LockSource {
+            root: PathBuf::from("tcp.compound.yaml"),
+            includes: Vec::new(),
+            generated_by: None,
+        },
+        digest: None,
+        tcp: TcpPolicyBody {
+            default: Some(TcpDefault::Deny),
+            direct: Some(DirectPolicy::deny_all()),
+            encrypted_hostname_unverifiable: Some(HostnameVerificationPolicy::Deny),
+            deny_cidrs: vec!["10.0.0.0/8".parse().expect("cidr")],
+            allow: vec![TcpAllowRule {
+                host: None,
+                cidr: Some("203.0.113.0/24".parse().expect("cidr")),
+                ports: PortList::new([443]),
+                protocol: TcpProtocol::Tcp,
+                limits: None,
+                source: None,
+            }],
+        },
+        audit: None,
+        validation: ValidationReport::default(),
+    }
+}
+
 fn start_echo_server() -> io::Result<SocketAddr> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let addr = listener.local_addr()?;
@@ -84,6 +118,16 @@ fn start_gateway(gateway: Gateway) -> io::Result<SocketAddr> {
     let addr = listener.local_addr()?;
     thread::spawn(move || {
         let _ = gateway.serve_once(&listener);
+    });
+    Ok(addr)
+}
+
+fn start_transparent_gateway(gateway: Gateway, destination: SocketAddr) -> io::Result<SocketAddr> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    thread::spawn(move || {
+        let (client, _) = listener.accept().expect("transparent accept");
+        let _ = gateway.handle_transparent_client_with_destination(client, destination);
     });
     Ok(addr)
 }
@@ -235,5 +279,61 @@ fn original_destination_fails_closed_on_unsupported_platforms() -> io::Result<()
         GatewayError::TransparentOriginalDestinationUnsupported
     ));
     drop(client);
+    Ok(())
+}
+
+#[test]
+fn transparent_gateway_proxies_cidr_allowed_destination_without_connect_header() -> io::Result<()> {
+    let upstream = match start_echo_server() {
+        Ok(upstream) => upstream,
+        Err(error) if skip_if_bind_denied(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let audit = Arc::new(MemoryAuditSink::default());
+    let destination = SocketAddr::new("203.0.113.42".parse().expect("ip"), 443);
+    let gateway_addr =
+        start_transparent_gateway(gateway(cidr_policy(), upstream, audit.clone()), destination)?;
+
+    let mut client = TcpStream::connect(gateway_addr).expect("connect gateway");
+    let mut reader = BufReader::new(client.try_clone().expect("clone client"));
+    client.write_all(b"hello").expect("write payload");
+    let mut echoed = [0_u8; 5];
+    reader.read_exact(&mut echoed).expect("read echo");
+
+    assert_eq!(&echoed, b"hello");
+    assert!(audit.events().iter().any(|event| {
+        matches!(event, GatewayAuditEvent::Allow { host, port: 443, ip, .. } if host == "203.0.113.42:443" && *ip == destination.ip())
+    }));
+    Ok(())
+}
+
+#[test]
+fn transparent_gateway_denies_hostname_policy_without_claiming_identity() -> io::Result<()> {
+    let upstream = match start_echo_server() {
+        Ok(upstream) => upstream,
+        Err(error) if skip_if_bind_denied(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let audit = Arc::new(MemoryAuditSink::default());
+    let destination = SocketAddr::new("203.0.113.42".parse().expect("ip"), 443);
+    let gateway_addr =
+        start_transparent_gateway(gateway(policy(None), upstream, audit.clone()), destination)?;
+
+    let mut client = TcpStream::connect(gateway_addr).expect("connect gateway");
+    client.write_all(b"hello").expect("write payload");
+    let mut response = [0_u8; 1];
+    match client.read(&mut response) {
+        Ok(0) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+            ) => {}
+        result => panic!("expected transparent close, got {result:?}"),
+    }
+
+    assert!(audit.events().iter().any(|event| {
+        matches!(event, GatewayAuditEvent::Deny { host, port: 443, reason } if host == "203.0.113.42:443" && reason == "no_matching_allow_rule")
+    }));
     Ok(())
 }

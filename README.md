@@ -213,8 +213,8 @@ TCP policy model and gateway logic:
 - `explain.rs`: human-readable lock summaries.
 - `gateway.rs`: explicit CONNECT-style gateway harness used to test policy,
   DNS resolution, deny decisions, audit events, proxying, and upload limits.
-  It also exposes the Linux `SO_ORIGINAL_DST` helper needed by the future
-  transparent gateway path.
+  It also exposes the Linux `SO_ORIGINAL_DST` helper and a raw transparent
+  handler for IP/CIDR decisions.
 
 This crate does not itself create the transparent network boundary. It is the
 policy/gateway brain used by `compoundd` and future runtime wiring.
@@ -273,7 +273,8 @@ Important test surfaces:
 - `crates/compound-tcp/tests/tcp_api.rs`: TCP schema, validation, lock
   generation, explanation, and connection evaluation.
 - `crates/compound-tcp/tests/gateway.rs`: explicit gateway proxy/audit/upload
-  limit behavior and Linux original-destination recovery smoke coverage.
+  limit behavior, raw transparent gateway behavior, and Linux
+  original-destination recovery smoke coverage.
 - `crates/compoundd/tests/network_plan.rs`: CI-safe transparent network setup
   plan tests for namespace/veth/nftables/TPROXY invariants.
 
