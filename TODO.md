@@ -19,9 +19,10 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - `read`/`list` and `write`/`create`/`delete` separation
   - realistic host secret fixture denial
   - malformed lock files fail before target execution
-  - rename/link boundary behavior
+  - several rename/link boundary behaviors
   - existing hard-link reachability is documented as a Landlock path semantics
     limitation
+  - rename target-create behavior is documented as a Landlock semantics nuance
 - TCP policy/schema/lock/explain/evaluator APIs exist.
 - TCP gateway code is currently an explicit CONNECT-style test harness, not
   transparent enforcement.
@@ -136,10 +137,12 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
     path.
   - Existing hard links inside an allowed directory are documented as readable
     under Landlock path-reachability semantics.
-- [x] Add rename/link boundary tests in more combinations.
+- [ ] Add/clarify rename/link boundary tests in more combinations.
   - allowed to denied
   - denied to allowed
-  - source without `rename`
+  - document observed target-create semantics
+  - decide whether Compound's high-level `rename` maps cleanly enough to
+    Landlock `REFER`, or whether policy semantics need to be renamed/refined
   - hard-link creation across policy boundaries
 - [ ] Add Unix socket tests.
   - Can a jailed process create a Unix socket in a writable allowed directory?

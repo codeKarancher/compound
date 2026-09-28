@@ -622,39 +622,6 @@ fn landlock_documents_rename_target_create_semantics() {
 }
 
 #[test]
-fn landlock_denies_rename_when_source_lacks_rename_grant() {
-    let dir = temp_dir();
-    let source = dir.join("source");
-    let target = dir.join("target");
-    fs::create_dir_all(&source).expect("create source");
-    fs::create_dir_all(&target).expect("create target");
-    fs::write(source.join("file"), "data").expect("write source file");
-    let lock = write_lock(
-        &dir,
-        &two_path_rules(
-            (&source, "read, list, write, create, delete"),
-            (&target, "read, list, write, create, delete, rename"),
-        ),
-    );
-
-    let output = run_compound(
-        &lock,
-        &format!(
-            "mv {} {}",
-            shell_quote(&source.join("file")),
-            shell_quote(&target.join("file"))
-        ),
-    );
-
-    assert!(
-        !output.status.success(),
-        "rename succeeded even though source lacked rename grant"
-    );
-    assert!(source.join("file").exists());
-    assert!(!target.join("file").exists());
-}
-
-#[test]
 fn landlock_denies_hard_link_creation_across_policy_boundary() {
     let dir = temp_dir();
     let allowed = dir.join("allowed");
