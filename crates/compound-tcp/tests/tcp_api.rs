@@ -1,7 +1,8 @@
 use compound_tcp::{
     evaluate_connection, explain_lock, lock_policy_from_path, ConnectionDecision,
     ConnectionRequest, DirectAction, EncryptedHostnamePolicy, TcpAllowRule, TcpDefault,
-    TcpDirectPolicy, TcpLockDocument, TcpLockOptions, TcpProtocol, TcpSourceDocument,
+    TcpDenyReason, TcpDirectPolicy, TcpLockDocument, TcpLockOptions, TcpProtocol,
+    TcpSourceDocument,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -434,6 +435,76 @@ tcp:
 }
 
 #[test]
+fn source_validation_rejects_duplicate_allow_identities() {
+    let policy = parse_source(
+        r#"
+version: 1
+metadata:
+  name: duplicate-allow
+tcp:
+  default: deny
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+  encrypted_hostname_unverifiable: deny
+  deny_cidrs:
+    - 127.0.0.0/8
+  allow:
+    - host: GitHub.com
+      ports: [443]
+      protocol: tls
+    - host: github.com.
+      ports: [443]
+      protocol: tls
+"#,
+    );
+
+    let errors = policy
+        .validate_root_policy()
+        .expect_err("duplicate normalized destinations should be rejected");
+
+    assert!(errors.iter().any(|error| {
+        error.field == "tcp.allow" && error.message.contains("duplicate TCP allow rule")
+    }));
+}
+
+#[test]
+fn source_validation_rejects_allow_cidr_inside_denied_cidr() {
+    let policy = parse_source(
+        r#"
+version: 1
+metadata:
+  name: denied-cidr-allow
+tcp:
+  default: deny
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+  encrypted_hostname_unverifiable: deny
+  deny_cidrs:
+    - 10.0.0.0/8
+    - 127.0.0.0/8
+  allow:
+    - cidr: 10.1.2.0/24
+      ports: [443]
+      protocol: tcp
+"#,
+    );
+
+    let errors = policy
+        .validate_root_policy()
+        .expect_err("allow CIDR covered by denied CIDR should be rejected");
+
+    assert!(errors.iter().any(|error| {
+        error.field == "tcp.allow.cidr" && error.message.contains("covered by denied CIDR")
+    }));
+}
+
+#[test]
 fn parses_binary_byte_sizes() {
     let policy = parse_source(
         r#"
@@ -517,6 +588,96 @@ fn evaluates_connections_against_lock() {
         &ConnectionRequest::tls("example.com", "93.184.216.34".parse().unwrap(), 443),
     );
     assert_eq!(unknown_host.decision, ConnectionDecision::Deny);
+}
+
+#[test]
+fn evaluator_requires_hostname_for_hostname_rules() {
+    let lock: TcpLockDocument = parse_lock(
+        r#"
+version: 1
+metadata:
+  name: hostname-required
+source:
+  root: tcp.compound.yaml
+tcp:
+  default: deny
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+  encrypted_hostname_unverifiable: deny
+  deny_cidrs:
+    - 127.0.0.0/8
+  allow:
+    - host: api.github.com
+      ports: [443]
+      protocol: tls
+"#,
+    );
+
+    let evaluation = evaluate_connection(
+        &lock,
+        &ConnectionRequest {
+            destination_ip: "140.82.114.6".parse().unwrap(),
+            requested_hostname: None,
+            port: 443,
+            protocol: TcpProtocol::Tls,
+        },
+    );
+
+    assert_eq!(evaluation.decision, ConnectionDecision::Deny);
+    assert_eq!(evaluation.reason, Some(TcpDenyReason::HostnameRequired));
+}
+
+#[test]
+fn evaluator_allows_direct_ip_only_through_cidr_rule() {
+    let lock: TcpLockDocument = parse_lock(
+        r#"
+version: 1
+metadata:
+  name: cidr-direct-ip
+source:
+  root: tcp.compound.yaml
+tcp:
+  default: deny
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+  encrypted_hostname_unverifiable: deny
+  deny_cidrs:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+  allow:
+    - cidr: 203.0.113.0/24
+      ports: [443]
+      protocol: tcp
+"#,
+    );
+
+    let allowed = evaluate_connection(
+        &lock,
+        &ConnectionRequest {
+            destination_ip: "203.0.113.42".parse().unwrap(),
+            requested_hostname: None,
+            port: 443,
+            protocol: TcpProtocol::Tcp,
+        },
+    );
+    let wrong_protocol = evaluate_connection(
+        &lock,
+        &ConnectionRequest {
+            destination_ip: "203.0.113.42".parse().unwrap(),
+            requested_hostname: None,
+            port: 443,
+            protocol: TcpProtocol::Tls,
+        },
+    );
+
+    assert_eq!(allowed.decision, ConnectionDecision::Allow);
+    assert_eq!(wrong_protocol.decision, ConnectionDecision::Deny);
 }
 
 #[test]

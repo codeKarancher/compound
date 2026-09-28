@@ -227,6 +227,7 @@ fn fs_lock<W: Write>(command: &LockCommand, writer: &mut W) -> Result<i32, CliEr
 
 fn fs_explain<W: Write>(command: &ExplainCommand, writer: &mut W) -> Result<i32, CliError> {
     let lock: FsLockDocument = read_yaml(&command.policy)?;
+    lock.validate_lock().map_err(CliError::InvalidFsLock)?;
     let explanation = explain_fs_lock(&lock);
 
     writeln!(writer, "filesystem policy:")?;
@@ -267,6 +268,7 @@ fn tcp_lock<W: Write>(command: &LockCommand, writer: &mut W) -> Result<i32, CliE
 
 fn tcp_explain<W: Write>(command: &ExplainCommand, writer: &mut W) -> Result<i32, CliError> {
     let lock: TcpLockDocument = read_yaml(&command.policy)?;
+    lock.validate_lock().map_err(CliError::InvalidTcpLock)?;
     let explanation = explain_tcp_lock(&lock);
 
     writeln!(writer, "TCP policy:")?;
@@ -407,6 +409,10 @@ pub enum CliError {
     TcpLock(#[from] compound_tcp::TcpLockError),
     #[error(transparent)]
     Runtime(#[from] compound_runtime::RuntimeError),
+    #[error("invalid fs lock: {0:?}")]
+    InvalidFsLock(Vec<compound_fs::FsValidationError>),
+    #[error("invalid TCP lock: {0:?}")]
+    InvalidTcpLock(Vec<compound_tcp::TcpValidationError>),
 }
 
 #[cfg(test)]

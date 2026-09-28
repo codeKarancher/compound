@@ -83,6 +83,14 @@ pub enum LandlockError {
     InvalidPolicy(String),
     #[error("Landlock enforcement requires Linux")]
     UnsupportedPlatform,
+    #[error(
+        "Landlock ABI {actual} is unsupported; Compound filesystem enforcement requires ABI {required} or newer ({reason})"
+    )]
+    UnsupportedAbi {
+        actual: i64,
+        required: i64,
+        reason: &'static str,
+    },
     #[error("Landlock syscall failed at {operation}: {source}")]
     Syscall {
         operation: &'static str,
@@ -98,10 +106,18 @@ pub enum LandlockError {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::{fs::File, io, os::fd::AsRawFd};
+    use std::{
+        ffi::CString,
+        io,
+        os::{
+            fd::{AsRawFd, FromRawFd, OwnedFd},
+            unix::ffi::OsStrExt,
+        },
+    };
 
     const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1;
     const LANDLOCK_RULE_PATH_BENEATH: u32 = 1;
+    const MINIMUM_SUPPORTED_ABI: i64 = 3;
 
     const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
     const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
@@ -109,8 +125,13 @@ mod linux {
     const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
     const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
     const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+    const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
     const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
     const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+    const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+    const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+    const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+    const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
     const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
     const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 
@@ -126,39 +147,40 @@ mod linux {
     }
 
     pub fn apply_landlock_plan(plan: &LandlockPlan) -> Result<(), LandlockError> {
-        let handled_access_fs = all_rights();
+        ensure_supported_abi()?;
+
+        let handled_access_fs = handled_rights();
         let ruleset_attr = LandlockRulesetAttr { handled_access_fs };
 
         let ruleset_fd = syscall_create_ruleset(&ruleset_attr)?;
         for rule in &plan.rules {
-            let file = File::open(&rule.path).map_err(|source| LandlockError::OpenPath {
-                path: rule.path.clone(),
-                source,
-            })?;
+            let file = open_landlock_path(&rule.path)?;
             let path_attr = LandlockPathBeneathAttr {
                 allowed_access: rights_to_bits(&rule.access),
                 parent_fd: file.as_raw_fd(),
             };
-            syscall_add_rule(ruleset_fd, &path_attr)?;
+            syscall_add_rule(ruleset_fd.as_raw_fd(), &path_attr)?;
         }
 
-        syscall_restrict_self(ruleset_fd)?;
-        unsafe {
-            libc::close(ruleset_fd);
-        }
+        syscall_restrict_self(ruleset_fd.as_raw_fd())?;
 
         Ok(())
     }
 
-    fn all_rights() -> u64 {
+    fn handled_rights() -> u64 {
         LANDLOCK_ACCESS_FS_EXECUTE
             | LANDLOCK_ACCESS_FS_WRITE_FILE
             | LANDLOCK_ACCESS_FS_READ_FILE
             | LANDLOCK_ACCESS_FS_READ_DIR
             | LANDLOCK_ACCESS_FS_REMOVE_DIR
             | LANDLOCK_ACCESS_FS_REMOVE_FILE
+            | LANDLOCK_ACCESS_FS_MAKE_CHAR
             | LANDLOCK_ACCESS_FS_MAKE_DIR
             | LANDLOCK_ACCESS_FS_MAKE_REG
+            | LANDLOCK_ACCESS_FS_MAKE_SOCK
+            | LANDLOCK_ACCESS_FS_MAKE_FIFO
+            | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+            | LANDLOCK_ACCESS_FS_MAKE_SYM
             | LANDLOCK_ACCESS_FS_REFER
             | LANDLOCK_ACCESS_FS_TRUNCATE
     }
@@ -177,7 +199,38 @@ mod linux {
         })
     }
 
-    fn syscall_create_ruleset(attr: &LandlockRulesetAttr) -> Result<i32, LandlockError> {
+    fn ensure_supported_abi() -> Result<(), LandlockError> {
+        let abi = kernel_landlock_abi()?;
+        if abi < MINIMUM_SUPPORTED_ABI {
+            return Err(LandlockError::UnsupportedAbi {
+                actual: abi,
+                required: MINIMUM_SUPPORTED_ABI,
+                reason: "rename/reparent and truncate must be enforceable for Compound's fs access model",
+            });
+        }
+        Ok(())
+    }
+
+    fn open_landlock_path(path: &PathBuf) -> Result<OwnedFd, LandlockError> {
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|source| {
+            LandlockError::OpenPath {
+                path: path.clone(),
+                source: io::Error::new(io::ErrorKind::InvalidInput, source),
+            }
+        })?;
+
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(LandlockError::OpenPath {
+                path: path.clone(),
+                source: io::Error::last_os_error(),
+            });
+        }
+
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    fn syscall_create_ruleset(attr: &LandlockRulesetAttr) -> Result<OwnedFd, LandlockError> {
         let fd = unsafe {
             libc::syscall(
                 libc::SYS_landlock_create_ruleset,
@@ -189,7 +242,7 @@ mod linux {
         if fd < 0 {
             return Err(last_error("landlock_create_ruleset"));
         }
-        Ok(fd as i32)
+        Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
     }
 
     fn syscall_add_rule(
@@ -226,7 +279,6 @@ mod linux {
         }
     }
 
-    #[allow(dead_code)]
     fn kernel_landlock_abi() -> Result<i64, LandlockError> {
         let version = unsafe {
             libc::syscall(

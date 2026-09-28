@@ -3,6 +3,7 @@ use compound_policy::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
+    collections::BTreeSet,
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::PathBuf,
@@ -169,8 +170,28 @@ impl TcpPolicyBody {
             }
         }
 
+        let mut seen = BTreeSet::new();
         for rule in &self.allow {
             rule.validate(errors);
+            if !seen.insert(rule.identity_key()) {
+                errors.push(TcpValidationError::new(
+                    "tcp.allow",
+                    "duplicate TCP allow rule destination/ports/protocol",
+                ));
+            }
+
+            if let Some(allow_cidr) = rule.cidr {
+                for deny_cidr in &self.deny_cidrs {
+                    if cidr_contains_cidr(*deny_cidr, allow_cidr) {
+                        errors.push(TcpValidationError::new(
+                            "tcp.allow.cidr",
+                            format!(
+                                "allow CIDR {allow_cidr} is covered by denied CIDR {deny_cidr}"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
 }
@@ -661,4 +682,18 @@ fn contains_v6(network: Ipv6Addr, ip: Ipv6Addr, prefix_len: u8) -> bool {
         u128::MAX << (128 - prefix_len)
     };
     u128::from(network) & mask == u128::from(ip) & mask
+}
+
+fn cidr_contains_cidr(container: Cidr, candidate: Cidr) -> bool {
+    match (container.addr, candidate.addr) {
+        (IpAddr::V4(_), IpAddr::V4(candidate_addr)) => {
+            candidate.prefix_len >= container.prefix_len
+                && container.contains(IpAddr::V4(candidate_addr))
+        }
+        (IpAddr::V6(_), IpAddr::V6(candidate_addr)) => {
+            candidate.prefix_len >= container.prefix_len
+                && container.contains(IpAddr::V6(candidate_addr))
+        }
+        _ => false,
+    }
 }

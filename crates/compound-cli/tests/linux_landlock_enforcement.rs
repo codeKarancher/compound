@@ -54,6 +54,12 @@ policy:
     lock
 }
 
+fn write_raw_lock(dir: &Path, contents: &str) -> PathBuf {
+    let lock = dir.join("fs-lock.compound.yaml");
+    fs::write(&lock, contents).expect("write raw fs lock");
+    lock
+}
+
 fn runtime_paths() -> &'static str {
     r#"    - path: /bin
       access: [read, list, execute]
@@ -78,6 +84,18 @@ fn path_rule(path: &Path, access: &str) -> String {
     )
 }
 
+fn two_path_rules(first: (&Path, &str), second: (&Path, &str)) -> String {
+    format!(
+        "{}{}",
+        path_rule(first.0, first.1),
+        path_rule(second.0, second.1)
+    )
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+}
+
 fn run_compound(lock: &Path, command: &str) -> Output {
     Command::new(compound_bin())
         .arg("exec")
@@ -89,6 +107,19 @@ fn run_compound(lock: &Path, command: &str) -> Output {
         .arg(command)
         .output()
         .expect("run compound")
+}
+
+fn assert_target_never_runs(lock: &Path) {
+    let output = run_compound(lock, "exit 42");
+
+    assert!(
+        !output.status.success(),
+        "invalid lock unexpectedly allowed target to run"
+    );
+    assert!(
+        output.status.code() != Some(42),
+        "target command ran before lock validation failed"
+    );
 }
 
 fn run_compound_with_workdir(lock: &Path, workdir: &Path, command: &str) -> Output {
@@ -310,6 +341,43 @@ fn landlock_denies_workdir_outside_grants() {
 }
 
 #[test]
+fn landlock_denies_realistic_secret_fixture_reads() {
+    let dir = temp_dir();
+    let allowed = dir.join("workspace");
+    let home = dir.join("home");
+    let browser = home.join(".config/browser/Default");
+    fs::create_dir_all(&allowed).expect("create workspace");
+    fs::create_dir_all(home.join(".ssh")).expect("create ssh dir");
+    fs::create_dir_all(home.join(".aws")).expect("create aws dir");
+    fs::create_dir_all(home.join(".kube")).expect("create kube dir");
+    fs::create_dir_all(home.join(".docker")).expect("create docker dir");
+    fs::create_dir_all(&browser).expect("create browser profile dir");
+    fs::write(home.join(".ssh/id_rsa"), "fake ssh private key").expect("write ssh secret");
+    fs::write(home.join(".aws/credentials"), "fake aws credentials").expect("write aws secret");
+    fs::write(home.join(".kube/config"), "fake kube config").expect("write kube secret");
+    fs::write(home.join(".docker/config.json"), "fake docker auth").expect("write docker secret");
+    fs::write(browser.join("Cookies"), "fake browser token").expect("write browser secret");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list, write, create"));
+    let command = format!(
+        r#"for file in {} {} {} {} {}; do if cat "$file" >/dev/null 2>&1; then exit 42; fi; done"#,
+        shell_quote(&home.join(".ssh/id_rsa")),
+        shell_quote(&home.join(".aws/credentials")),
+        shell_quote(&home.join(".kube/config")),
+        shell_quote(&home.join(".docker/config.json")),
+        shell_quote(&browser.join("Cookies"))
+    );
+
+    let output = run_compound(&lock, &command);
+
+    assert!(
+        output.status.success(),
+        "one or more realistic secret fixtures were readable: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn landlock_denies_inherited_fd_escape() {
     let dir = temp_dir();
     let allowed = dir.join("allowed");
@@ -344,6 +412,33 @@ fn landlock_denies_dev_fd_escape() {
     assert!(
         !output.status.success(),
         "/dev/fd escaped Landlock restriction"
+    );
+}
+
+#[test]
+fn landlock_documents_existing_hard_link_reachability() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    let denied_secret = denied.join("secret");
+    let allowed_link = allowed.join("secret-hardlink");
+    fs::write(&denied_secret, "shared inode secret").expect("write denied secret");
+    fs::hard_link(&denied_secret, &allowed_link).expect("create hard link");
+    let lock = write_lock(&dir, &path_rule(&allowed, "read, list"));
+
+    let output = run_compound(&lock, &format!("cat {}", shell_quote(&allowed_link)));
+
+    assert!(
+        output.status.success(),
+        "hard link inside granted tree was not readable: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "shared inode secret"
     );
 }
 
@@ -459,6 +554,220 @@ fn landlock_denies_rename_across_policy_boundary() {
     );
     assert!(allowed.join("file").exists());
     assert!(!denied.join("file").exists());
+}
+
+#[test]
+fn landlock_denies_rename_from_denied_into_allowed() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("file"), "data").expect("write denied file");
+    let lock = write_lock(
+        &dir,
+        &path_rule(&allowed, "read, list, write, create, delete, rename"),
+    );
+
+    let output = run_compound(
+        &lock,
+        &format!(
+            "mv {} {}",
+            shell_quote(&denied.join("file")),
+            shell_quote(&allowed.join("file"))
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "rename from denied tree into allowed tree succeeded"
+    );
+    assert!(denied.join("file").exists());
+    assert!(!allowed.join("file").exists());
+}
+
+#[test]
+fn landlock_denies_rename_into_allowed_directory_without_rename_grant() {
+    let dir = temp_dir();
+    let source = dir.join("source");
+    let target = dir.join("target");
+    fs::create_dir_all(&source).expect("create source");
+    fs::create_dir_all(&target).expect("create target");
+    fs::write(source.join("file"), "data").expect("write source file");
+    let lock = write_lock(
+        &dir,
+        &two_path_rules(
+            (&source, "read, list, write, create, delete, rename"),
+            (&target, "read, list, write, create, delete"),
+        ),
+    );
+
+    let output = run_compound(
+        &lock,
+        &format!(
+            "mv {} {}",
+            shell_quote(&source.join("file")),
+            shell_quote(&target.join("file"))
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "rename into target without rename grant succeeded"
+    );
+    assert!(source.join("file").exists());
+    assert!(!target.join("file").exists());
+}
+
+#[test]
+fn landlock_denies_hard_link_creation_across_policy_boundary() {
+    let dir = temp_dir();
+    let allowed = dir.join("allowed");
+    let denied = dir.join("denied");
+    fs::create_dir_all(&allowed).expect("create allowed");
+    fs::create_dir_all(&denied).expect("create denied");
+    fs::write(denied.join("secret"), "secret").expect("write denied secret");
+    let lock = write_lock(
+        &dir,
+        &path_rule(&allowed, "read, list, write, create, delete, rename"),
+    );
+
+    let output = run_compound(
+        &lock,
+        &format!(
+            "ln {} {}",
+            shell_quote(&denied.join("secret")),
+            shell_quote(&allowed.join("linked-secret"))
+        ),
+    );
+
+    assert!(
+        !output.status.success(),
+        "hard link creation from denied tree into allowed tree succeeded"
+    );
+    assert!(!allowed.join("linked-secret").exists());
+}
+
+#[test]
+fn landlock_rejects_relative_lock_path_before_target_runs() {
+    let dir = temp_dir();
+    let lock = write_raw_lock(
+        &dir,
+        r#"
+version: 1
+kind: fs-lock
+metadata:
+  name: invalid-relative-path
+source:
+  root: fs.compound.yaml
+policy:
+  default: deny
+  paths:
+    - path: relative/path
+      access: [read]
+  inherited_file_descriptors: deny
+"#,
+    );
+
+    assert_target_never_runs(&lock);
+}
+
+#[test]
+fn landlock_rejects_inherit_default_before_target_runs() {
+    let dir = temp_dir();
+    let lock = write_raw_lock(
+        &dir,
+        &format!(
+            r#"
+version: 1
+kind: fs-lock
+metadata:
+  name: invalid-inherit-default
+source:
+  root: fs.compound.yaml
+policy:
+  default: inherit
+  paths:
+{}  inherited_file_descriptors: deny
+"#,
+            path_rule(&dir, "read, list")
+        ),
+    );
+
+    assert_target_never_runs(&lock);
+}
+
+#[test]
+fn landlock_rejects_empty_paths_before_target_runs() {
+    let dir = temp_dir();
+    let lock = write_raw_lock(
+        &dir,
+        r#"
+version: 1
+kind: fs-lock
+metadata:
+  name: invalid-empty-paths
+source:
+  root: fs.compound.yaml
+policy:
+  default: deny
+  paths: []
+  inherited_file_descriptors: deny
+"#,
+    );
+
+    assert_target_never_runs(&lock);
+}
+
+#[test]
+fn landlock_rejects_unsupported_version_before_target_runs() {
+    let dir = temp_dir();
+    let lock = write_raw_lock(
+        &dir,
+        &format!(
+            r#"
+version: 999
+kind: fs-lock
+metadata:
+  name: invalid-version
+source:
+  root: fs.compound.yaml
+policy:
+  default: deny
+  paths:
+{}  inherited_file_descriptors: deny
+"#,
+            path_rule(&dir, "read, list")
+        ),
+    );
+
+    assert_target_never_runs(&lock);
+}
+
+#[test]
+fn landlock_rejects_conflicting_duplicate_paths_before_target_runs() {
+    let dir = temp_dir();
+    let lock = write_raw_lock(
+        &dir,
+        &format!(
+            r#"
+version: 1
+kind: fs-lock
+metadata:
+  name: invalid-duplicate-paths
+source:
+  root: fs.compound.yaml
+policy:
+  default: deny
+  paths:
+{}{}  inherited_file_descriptors: deny
+"#,
+            path_rule(&dir, "read"),
+            path_rule(&dir, "read, write")
+        ),
+    );
+
+    assert_target_never_runs(&lock);
 }
 
 #[test]
