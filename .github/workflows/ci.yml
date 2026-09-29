@@ -74,4 +74,4 @@ jobs:
       - name: Run privileged TPROXY integration tests
         env:
           COMPOUND_RUN_PRIVILEGED_NET_TESTS: "1"
-        run: cargo test -p compoundd --test tproxy_adversarial -- --nocapture
+        run: sudo -E env "PATH=$PATH" cargo test -p compoundd --test tproxy_adversarial -- --nocapture

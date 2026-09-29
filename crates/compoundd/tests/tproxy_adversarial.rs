@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use compound_tcp::{
-    bind_transparent_listener, Gateway, GatewayAuditEvent, GatewayError, MemoryAuditSink,
-    StaticResolver, SystemConnector, TcpLockDocument,
+    bind_transparent_listener, Gateway, GatewayAuditEvent, MemoryAuditSink, StaticResolver,
+    SystemConnector, TcpLockDocument,
 };
 use compoundd::{build_network_plan, NetworkCommand, NetworkPlan, NetworkPlanOptions};
 use std::{
