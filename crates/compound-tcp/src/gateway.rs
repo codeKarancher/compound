@@ -475,8 +475,6 @@ fn platform_original_destination(_stream: &TcpStream) -> Result<SocketAddr, Gate
 
 #[cfg(target_os = "linux")]
 fn platform_bind_transparent_listener(addr: SocketAddr) -> Result<TcpListener, GatewayError> {
-    use std::net::SocketAddrV4;
-
     let SocketAddr::V4(addr) = addr else {
         return Err(GatewayError::TransparentListenerUnsupported(
             "IPv6 transparent listeners are not implemented yet".to_owned(),
@@ -506,7 +504,7 @@ fn platform_bind_transparent_listener(addr: SocketAddr) -> Result<TcpListener, G
 #[cfg(target_os = "linux")]
 fn bind_transparent_listener_fd(
     fd: libc::c_int,
-    addr: SocketAddrV4,
+    addr: std::net::SocketAddrV4,
 ) -> Result<TcpListener, GatewayError> {
     use std::{mem, net::Ipv4Addr, os::fd::FromRawFd};
 
