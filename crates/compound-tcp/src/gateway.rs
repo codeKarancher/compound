@@ -8,6 +8,7 @@ use std::{
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 use thiserror::Error;
 
@@ -152,11 +153,11 @@ impl Gateway {
 
         if evaluation.decision == ConnectionDecision::Deny {
             self.audit.record(GatewayAuditEvent::Deny {
-                host: destination_label,
+                host: destination_label.clone(),
                 port: destination.port(),
                 reason: format_deny_reason(evaluation.reason.as_ref()),
             });
-            return Ok(());
+            return deny_transparent_client(client);
         }
 
         let rule_index = evaluation.rule_index.expect("allow has rule index");
@@ -193,6 +194,10 @@ impl Gateway {
 
 pub fn original_destination(stream: &TcpStream) -> Result<SocketAddr, GatewayError> {
     platform_original_destination(stream)
+}
+
+pub fn bind_transparent_listener(addr: SocketAddr) -> Result<TcpListener, GatewayError> {
+    platform_bind_transparent_listener(addr)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +362,66 @@ fn proxy(
     Ok(())
 }
 
+fn deny_transparent_client(client: TcpStream) -> Result<(), GatewayError> {
+    if let Some(prefix) = peek_client_prefix(&client)? {
+        if looks_like_http_request(&prefix) {
+            write_http_service_unavailable(client)?;
+            return Ok(());
+        }
+    }
+
+    let _ = client.shutdown(std::net::Shutdown::Both);
+    Ok(())
+}
+
+fn peek_client_prefix(client: &TcpStream) -> Result<Option<Vec<u8>>, GatewayError> {
+    client.set_read_timeout(Some(Duration::from_millis(100)))?;
+    let mut buffer = [0_u8; 16];
+    match client.peek(&mut buffer) {
+        Ok(0) => Ok(None),
+        Ok(read) => Ok(Some(buffer[..read].to_vec())),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(GatewayError::Io(error)),
+    }
+}
+
+fn looks_like_http_request(prefix: &[u8]) -> bool {
+    [
+        b"GET " as &[u8],
+        b"POST ",
+        b"PUT ",
+        b"PATCH ",
+        b"DELETE ",
+        b"HEAD ",
+        b"OPTIONS ",
+        b"TRACE ",
+        b"CONNECT ",
+    ]
+    .iter()
+    .any(|method| prefix.starts_with(method))
+}
+
+fn write_http_service_unavailable(mut client: TcpStream) -> Result<(), GatewayError> {
+    client.write_all(
+        b"HTTP/1.1 503 Service Unavailable\r\n\
+          Connection: close\r\n\
+          Content-Type: text/plain\r\n\
+          Cache-Control: no-store\r\n\
+          Content-Length: 19\r\n\
+          \r\n\
+          Service unavailable",
+    )?;
+    let _ = client.shutdown(std::net::Shutdown::Both);
+    Ok(())
+}
+
 fn format_deny_reason(reason: Option<&TcpDenyReason>) -> String {
     match reason {
         Some(TcpDenyReason::DestinationDeniedByCidr(cidr)) => {
@@ -408,6 +473,106 @@ fn platform_original_destination(_stream: &TcpStream) -> Result<SocketAddr, Gate
     Err(GatewayError::TransparentOriginalDestinationUnsupported)
 }
 
+#[cfg(target_os = "linux")]
+fn platform_bind_transparent_listener(addr: SocketAddr) -> Result<TcpListener, GatewayError> {
+    use std::net::SocketAddrV4;
+
+    let SocketAddr::V4(addr) = addr else {
+        return Err(GatewayError::TransparentListenerUnsupported(
+            "IPv6 transparent listeners are not implemented yet".to_owned(),
+        ));
+    };
+
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+            libc::IPPROTO_TCP,
+        )
+    };
+    if fd < 0 {
+        return Err(GatewayError::Io(io::Error::last_os_error()));
+    }
+
+    let listener = bind_transparent_listener_fd(fd, addr);
+    if listener.is_err() {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+    listener
+}
+
+#[cfg(target_os = "linux")]
+fn bind_transparent_listener_fd(
+    fd: libc::c_int,
+    addr: SocketAddrV4,
+) -> Result<TcpListener, GatewayError> {
+    use std::{mem, net::Ipv4Addr, os::fd::FromRawFd};
+
+    set_socket_option(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR)?;
+    set_socket_option(fd, libc::SOL_IP, libc::IP_TRANSPARENT)?;
+
+    let sockaddr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: addr.port().to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(addr.ip().octets()),
+        },
+        sin_zero: [0; 8],
+    };
+    let result = unsafe {
+        libc::bind(
+            fd,
+            (&sockaddr as *const libc::sockaddr_in).cast(),
+            mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(GatewayError::Io(io::Error::last_os_error()));
+    }
+
+    let result = unsafe { libc::listen(fd, 128) };
+    if result != 0 {
+        return Err(GatewayError::Io(io::Error::last_os_error()));
+    }
+
+    let listener = unsafe { TcpListener::from_raw_fd(fd) };
+    if listener.local_addr()?.ip() == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+        return Err(GatewayError::TransparentListenerUnsupported(
+            "transparent listener bound to unspecified address".to_owned(),
+        ));
+    }
+    Ok(listener)
+}
+
+#[cfg(target_os = "linux")]
+fn set_socket_option(
+    fd: libc::c_int,
+    level: libc::c_int,
+    option: libc::c_int,
+) -> Result<(), GatewayError> {
+    let value: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            option,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(GatewayError::Io(io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_bind_transparent_listener(_addr: SocketAddr) -> Result<TcpListener, GatewayError> {
+    Err(GatewayError::TransparentOriginalDestinationUnsupported)
+}
+
 #[derive(Debug, Error)]
 pub enum GatewayError {
     #[error("I/O error: {0}")]
@@ -418,6 +583,8 @@ pub enum GatewayError {
     InvalidOriginalDestination(String),
     #[error("transparent original destination lookup is only supported on Linux")]
     TransparentOriginalDestinationUnsupported,
+    #[error("transparent listener unsupported: {0}")]
+    TransparentListenerUnsupported(String),
     #[error("upload limit exceeded: {limit} bytes")]
     UploadLimitExceeded { limit: u64 },
 }

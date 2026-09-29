@@ -204,6 +204,10 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - recovers or accepts the original IP/port
   - allows only policy decisions enforceable without a claimed hostname
   - denies hostname-only policy until SNI/or hostname verification exists
+- [x] Implement initial normalized transparent denial behavior.
+  - cleartext HTTP receives generic `503 Service Unavailable`
+  - non-HTTP receives close/reset style failure with no policy detail
+  - trusted audit retains the detailed denial reason
 - [ ] Prove TPROXY-redirected original destination recovery against the real
   transparent gateway path.
 - [ ] Implement per-jail gateway lifecycle.

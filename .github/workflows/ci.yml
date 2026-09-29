@@ -52,3 +52,26 @@ jobs:
           cargo test -p compound-fs --test landlock_plan
           cargo test -p compound-runtime --test exec_runtime
           cargo test -p compound-cli --test linux_landlock_enforcement
+
+  privileged-network:
+    name: Privileged TPROXY network tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install network tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables python3
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run privileged TPROXY integration tests
+        env:
+          COMPOUND_RUN_PRIVILEGED_NET_TESTS: "1"
+        run: cargo test -p compoundd --test tproxy_adversarial -- --nocapture

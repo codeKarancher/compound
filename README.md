@@ -214,7 +214,8 @@ TCP policy model and gateway logic:
 - `gateway.rs`: explicit CONNECT-style gateway harness used to test policy,
   DNS resolution, deny decisions, audit events, proxying, and upload limits.
   It also exposes the Linux `SO_ORIGINAL_DST` helper and a raw transparent
-  handler for IP/CIDR decisions.
+  handler for IP/CIDR decisions. Denied transparent HTTP receives a generic
+  `503 Service Unavailable`; denied non-HTTP receives no policy-specific bytes.
 
 This crate does not itself create the transparent network boundary. It is the
 policy/gateway brain used by `compoundd` and future runtime wiring.
@@ -274,9 +275,13 @@ Important test surfaces:
   generation, explanation, and connection evaluation.
 - `crates/compound-tcp/tests/gateway.rs`: explicit gateway proxy/audit/upload
   limit behavior, raw transparent gateway behavior, and Linux
-  original-destination recovery smoke coverage.
+  original-destination recovery smoke coverage. It also covers normalized
+  transparent denial responses.
 - `crates/compoundd/tests/network_plan.rs`: CI-safe transparent network setup
   plan tests for namespace/veth/nftables/TPROXY invariants.
+- `crates/compoundd/tests/tproxy_adversarial.rs`: Linux privileged
+  namespace/veth/nftables/TPROXY integration coverage, gated by
+  `COMPOUND_RUN_PRIVILEGED_NET_TESTS=1`.
 
 GitHub Actions runs both the normal Rust workspace suite and a Linux enforcement
 job that explicitly exercises the Landlock tests.

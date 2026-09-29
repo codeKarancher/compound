@@ -337,3 +337,72 @@ fn transparent_gateway_denies_hostname_policy_without_claiming_identity() -> io:
     }));
     Ok(())
 }
+
+#[test]
+fn transparent_gateway_returns_generic_503_for_denied_http() -> io::Result<()> {
+    let upstream = match start_echo_server() {
+        Ok(upstream) => upstream,
+        Err(error) if skip_if_bind_denied(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let audit = Arc::new(MemoryAuditSink::default());
+    let destination = SocketAddr::new("203.0.113.42".parse().expect("ip"), 80);
+    let gateway_addr =
+        start_transparent_gateway(gateway(policy(None), upstream, audit.clone()), destination)?;
+
+    let mut client = TcpStream::connect(gateway_addr).expect("connect gateway");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .expect("write http request");
+    let mut response = String::new();
+    client
+        .read_to_string(&mut response)
+        .expect("read http denial");
+
+    assert!(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    assert!(response.contains("\r\n\r\nService unavailable"));
+    assert!(!response.contains("deny"));
+    assert!(!response.contains("policy"));
+    assert!(!response.contains("no_matching_allow_rule"));
+    assert!(audit.events().iter().any(|event| {
+        matches!(event, GatewayAuditEvent::Deny { host, port: 80, reason } if host == "203.0.113.42:80" && reason == "no_matching_allow_rule")
+    }));
+    Ok(())
+}
+
+#[test]
+fn transparent_gateway_does_not_send_policy_detail_for_denied_non_http() -> io::Result<()> {
+    let upstream = match start_echo_server() {
+        Ok(upstream) => upstream,
+        Err(error) if skip_if_bind_denied(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let audit = Arc::new(MemoryAuditSink::default());
+    let destination = SocketAddr::new("203.0.113.42".parse().expect("ip"), 443);
+    let gateway_addr =
+        start_transparent_gateway(gateway(policy(None), upstream, audit.clone()), destination)?;
+
+    let mut client = TcpStream::connect(gateway_addr).expect("connect gateway");
+    client
+        .write_all(b"\x16\x03\x01\x00\x2e")
+        .expect("write tls-like bytes");
+    let mut response = Vec::new();
+    match client.read_to_end(&mut response) {
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+            ) => {}
+        Err(error) => return Err(error),
+    }
+
+    let response = String::from_utf8_lossy(&response);
+    assert!(!response.contains("deny"));
+    assert!(!response.contains("policy"));
+    assert!(!response.contains("no_matching_allow_rule"));
+    assert!(audit.events().iter().any(|event| {
+        matches!(event, GatewayAuditEvent::Deny { host, port: 443, reason } if host == "203.0.113.42:443" && reason == "no_matching_allow_rule")
+    }));
+    Ok(())
+}
