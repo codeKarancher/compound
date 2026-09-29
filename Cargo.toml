@@ -12,7 +12,7 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/compound/compound"
+repository = "https://github.com/codeKarancher/compound"
 
 [workspace.dependencies]
 hex = "0.4"

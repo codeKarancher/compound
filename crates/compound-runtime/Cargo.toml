@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+compoundd = { path = "../compoundd" }
 compound-fs = { path = "../compound-fs" }
 libc.workspace = true
 serde_yaml.workspace = true

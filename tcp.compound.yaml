@@ -1,6 +1,7 @@
 # Example Compound TCP policy for a coding agent.
 
 version: 1
+kind: tcp-policy
 
 metadata:
   name: github-coding-agent-tcp

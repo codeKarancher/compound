@@ -30,6 +30,10 @@ impl NetworkPlanOptions {
             routing_table: 100,
         }
     }
+
+    pub fn gateway_addr(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(self.host_addr, self.gateway_port)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +142,7 @@ pub fn build_network_plan(
     let host_veth = interface_name("ch", &jail_key);
     let jail_veth = interface_name("cj", &jail_key);
     let table = format!("compound_{jail_key}");
-    let gateway_addr = SocketAddrV4::new(options.host_addr, options.gateway_port);
+    let gateway_addr = options.gateway_addr();
     let host_cidr = format!("{}/{}", options.host_addr, options.prefix_len);
     let jail_cidr = format!("{}/{}", options.jail_addr, options.prefix_len);
     let gateway = gateway_addr.to_string();
@@ -356,18 +360,6 @@ pub fn build_network_plan(
         ),
     ]);
 
-    commands.push(cmd(
-        "compoundd-gateway",
-        [
-            "--tcp-lock",
-            "<tcp-lock>",
-            "--listen",
-            gateway.as_str(),
-            "--namespace",
-            namespace.as_str(),
-        ],
-    ));
-
     let cleanup_commands = build_cleanup_commands(&namespace, &host_veth, &table, options);
 
     Ok(NetworkPlan {
@@ -389,7 +381,7 @@ pub fn build_cleanup_plan(options: &NetworkPlanOptions) -> Result<NetworkPlan, N
     let host_veth = interface_name("ch", &jail_key);
     let jail_veth = interface_name("cj", &jail_key);
     let table = format!("compound_{jail_key}");
-    let gateway_addr = SocketAddrV4::new(options.host_addr, options.gateway_port);
+    let gateway_addr = options.gateway_addr();
     let cleanup_commands = build_cleanup_commands(&namespace, &host_veth, &table, options);
 
     Ok(NetworkPlan {

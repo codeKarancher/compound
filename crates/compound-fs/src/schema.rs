@@ -1,5 +1,6 @@
 use compound_policy::{
-    AuditConfig, Digest, DocumentKind, Include, LockSource, Metadata, ValidationReport,
+    AuditConfig, Digest, DocumentKind, Include, LockSource, Metadata, ValidationFinding,
+    ValidationReport,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::PathBuf};
@@ -136,6 +137,50 @@ impl FsPolicyBody {
             }
         }
     }
+
+    pub fn validation_warnings(&self) -> Vec<ValidationFinding> {
+        let mut warnings = Vec::new();
+
+        for rule in &self.paths {
+            let writable = rule.access.iter().any(|access| {
+                matches!(
+                    access,
+                    FsAccess::Write | FsAccess::Create | FsAccess::Delete | FsAccess::Rename
+                )
+            });
+            let executable = rule.access.contains(&FsAccess::Execute);
+
+            if writable && executable {
+                warnings.push(warning(format!(
+                    "{} grants write/create/delete/rename together with execute",
+                    rule.path.display()
+                )));
+            }
+
+            if writable && is_broad_write_path(&rule.path) {
+                warnings.push(warning(format!(
+                    "{} is a broad host path with write-like access",
+                    rule.path.display()
+                )));
+            }
+
+            if writable && executable && is_temp_or_workspace_path(&rule.path) {
+                warnings.push(warning(format!(
+                    "{} is executable and writable by the confined process",
+                    rule.path.display()
+                )));
+            }
+
+            if is_runtime_path(&rule.path) && has_runtime_write_or_execute(&rule.access) {
+                warnings.push(warning(format!(
+                    "{} is a runtime/system path with write-like or execute access",
+                    rule.path.display()
+                )));
+            }
+        }
+
+        warnings
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,11 +262,18 @@ fn validate_kind(
     expected: DocumentKind,
     errors: &mut Vec<FsValidationError>,
 ) {
-    if matches!(actual, Some(actual) if actual != expected) {
-        errors.push(FsValidationError::new(
+    match actual {
+        Some(actual) if actual == expected => {}
+        Some(actual) => {
+            errors.push(FsValidationError::new(
+                "kind",
+                format!("expected document kind {expected:?}, got {actual:?}"),
+            ));
+        }
+        None => errors.push(FsValidationError::new(
             "kind",
-            format!("expected document kind {expected:?}, got {actual:?}"),
-        ));
+            format!("document kind is required: {expected:?}"),
+        )),
     }
 }
 
@@ -249,4 +301,42 @@ fn finish_validation(errors: Vec<FsValidationError>) -> FsValidationResult {
     } else {
         Err(errors)
     }
+}
+
+fn warning(message: impl Into<String>) -> ValidationFinding {
+    ValidationFinding {
+        severity: compound_policy::Severity::Warning,
+        message: message.into(),
+    }
+}
+
+fn is_broad_write_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/") | Some("/usr") | Some("/bin") | Some("/etc") | Some("/home")
+    )
+}
+
+fn is_temp_or_workspace_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/tmp") | Some("/var/tmp") | Some("/workspace")
+    )
+}
+
+fn is_runtime_path(path: &std::path::Path) -> bool {
+    path.starts_with("/proc") || path.starts_with("/sys") || path.starts_with("/dev")
+}
+
+fn has_runtime_write_or_execute(access: &BTreeSet<FsAccess>) -> bool {
+    access.iter().any(|access| {
+        matches!(
+            access,
+            FsAccess::Write
+                | FsAccess::Create
+                | FsAccess::Delete
+                | FsAccess::Rename
+                | FsAccess::Execute
+        )
+    })
 }

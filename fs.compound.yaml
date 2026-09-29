@@ -1,6 +1,7 @@
 # Example Compound filesystem policy for a coding agent.
 
 version: 1
+kind: fs-policy
 
 metadata:
   name: github-coding-agent-fs

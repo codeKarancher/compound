@@ -1,5 +1,5 @@
 use crate::schema::{
-    FsDefault, FsLockDocument, FsPathRule, FsPolicyBody, FsSourceDocument, InheritedFileDescriptors,
+    FsLockDocument, FsPathRule, FsPolicyBody, FsSourceDocument, InheritedFileDescriptors,
 };
 use compound_policy::{Digest, DocumentKind, Include, LockSource, ValidationReport};
 use std::{
@@ -110,6 +110,7 @@ pub fn lock_policy(
         audit: root.audit,
         validation: ValidationReport::default(),
     };
+    lock.validation.findings = lock.policy.validation_warnings();
 
     let canonical_without_digest =
         serde_yaml::to_string(&lock).map_err(FsLockError::SerializeLock)?;
@@ -119,46 +120,18 @@ pub fn lock_policy(
 }
 
 fn validate_source_document(document: &FsSourceDocument) -> Result<(), FsLockError> {
-    if document.version != 1 {
-        return Err(FsLockError::UnsupportedVersion(document.version));
-    }
-
-    if matches!(document.kind, Some(kind) if kind != DocumentKind::FsPolicy) {
-        return Err(FsLockError::WrongKind {
-            expected: DocumentKind::FsPolicy,
-            actual: document.kind,
-        });
-    }
-
-    if document.policy.default != FsDefault::Deny {
-        return Err(FsLockError::InvalidPolicy(
-            "root filesystem policy must set policy.default: deny".to_owned(),
-        ));
-    }
-
-    Ok(())
+    document
+        .validate_root_policy()
+        .map_err(|errors| FsLockError::InvalidPolicy(format!("{errors:?}")))
 }
 
 fn validate_fragment_document(document: &FsSourceDocument, path: &Path) -> Result<(), FsLockError> {
-    if document.version != 1 {
-        return Err(FsLockError::UnsupportedVersion(document.version));
-    }
-
-    if matches!(document.kind, Some(kind) if kind != DocumentKind::FsPolicy) {
-        return Err(FsLockError::WrongKind {
-            expected: DocumentKind::FsPolicy,
-            actual: document.kind,
-        });
-    }
-
-    if document.policy.default != FsDefault::Inherit {
-        return Err(FsLockError::InvalidPolicy(format!(
-            "included filesystem policy fragment {} must set policy.default: inherit",
+    document.validate_fragment().map_err(|errors| {
+        FsLockError::InvalidPolicy(format!(
+            "included filesystem policy fragment {} is invalid: {errors:?}",
             path.display()
-        )));
-    }
-
-    Ok(())
+        ))
+    })
 }
 
 fn verify_include_digest(

@@ -109,6 +109,7 @@ pub fn lock_policy(
         audit: root.audit,
         validation: ValidationReport::default(),
     };
+    lock.validation.findings = lock.tcp.validation_warnings();
 
     let canonical_without_digest =
         serde_yaml::to_string(&lock).map_err(TcpLockError::SerializeLock)?;

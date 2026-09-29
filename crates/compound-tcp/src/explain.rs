@@ -1,13 +1,18 @@
 use crate::schema::{DirectAction, DirectPolicy};
 use crate::TcpLockDocument;
+use compound_policy::{Digest, LockSource, ValidationFinding};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpExplanation {
+    pub digest: Option<Digest>,
+    pub source: LockSource,
     pub default: String,
     pub direct: TcpDirectExplanation,
+    pub encrypted_hostname_unverifiable: String,
     pub deny_cidr_count: usize,
     pub allow_count: usize,
+    pub validation_findings: Vec<ValidationFinding>,
     pub allow: Vec<TcpAllowExplanation>,
 }
 
@@ -30,14 +35,22 @@ pub struct TcpDirectExplanation {
 
 pub fn explain_lock(lock: &TcpLockDocument) -> TcpExplanation {
     TcpExplanation {
+        digest: lock.digest.clone(),
+        source: lock.source.clone(),
         default: lock
             .tcp
             .default
             .map(|default| format!("{default:?}").to_ascii_lowercase())
             .unwrap_or_else(|| "unspecified".to_owned()),
         direct: explain_direct(lock.tcp.direct),
+        encrypted_hostname_unverifiable: lock
+            .tcp
+            .encrypted_hostname_unverifiable
+            .map(|policy| format!("{policy:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "unspecified".to_owned()),
         deny_cidr_count: lock.tcp.deny_cidrs.len(),
         allow_count: lock.tcp.allow.len(),
+        validation_findings: lock.validation.findings.clone(),
         allow: lock
             .tcp
             .allow

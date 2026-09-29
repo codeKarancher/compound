@@ -1,3 +1,4 @@
+use compound_policy::Severity;
 use compound_tcp::{
     evaluate_connection, explain_lock, lock_policy_from_path, ConnectionDecision,
     ConnectionRequest, DirectAction, EncryptedHostnamePolicy, TcpAllowRule, TcpDefault,
@@ -173,6 +174,7 @@ fn root_allow_rule_overrides_identical_fragment_destination() {
         "fragment.tcp.compound.yaml",
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: fragment
 tcp:
@@ -189,6 +191,7 @@ tcp:
         "tcp.compound.yaml",
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: root
 include:
@@ -237,10 +240,41 @@ tcp:
 }
 
 #[test]
+fn root_policy_validation_rejects_missing_kind() {
+    let policy = parse_source(
+        r#"
+version: 1
+metadata:
+  name: missing-kind
+tcp:
+  default: deny
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+  encrypted_hostname_unverifiable: deny
+  deny_cidrs:
+    - 127.0.0.0/8
+  allow: []
+"#,
+    );
+
+    let errors = policy
+        .validate_root_policy()
+        .expect_err("root policy should require kind");
+
+    assert!(errors.iter().any(|error| {
+        error.field == "kind" && error.message.contains("document kind is required")
+    }));
+}
+
+#[test]
 fn root_policy_validation_rejects_missing_default() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: missing-default
 tcp:
@@ -270,6 +304,7 @@ fn root_policy_validation_rejects_direct_network_allows() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: direct-network
 tcp:
@@ -297,6 +332,7 @@ fn fragment_validation_rejects_root_only_defaults() {
     let fragment = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: invalid-fragment
 tcp:
@@ -322,6 +358,7 @@ fn source_validation_rejects_invalid_ports() {
     let invalid = serde_yaml::from_str::<TcpSourceDocument>(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: invalid-port
 tcp:
@@ -346,6 +383,7 @@ fn source_validation_rejects_invalid_cidrs() {
     let invalid = serde_yaml::from_str::<TcpSourceDocument>(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: invalid-cidr
 tcp:
@@ -372,6 +410,7 @@ fn root_policy_validation_rejects_missing_deny_cidrs() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: missing-deny-cidrs
 tcp:
@@ -406,6 +445,7 @@ fn source_validation_rejects_url_like_hosts() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: url-like-host
 tcp:
@@ -439,6 +479,7 @@ fn source_validation_rejects_duplicate_allow_identities() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: duplicate-allow
 tcp:
@@ -471,10 +512,53 @@ tcp:
 }
 
 #[test]
+fn source_validation_warns_about_ambiguous_overlapping_tcp_rules() {
+    let policy = parse_source(
+        r#"
+version: 1
+kind: tcp-policy
+metadata:
+  name: overlapping-cidrs
+tcp:
+  default: deny
+  direct:
+    tcp: deny
+    udp: deny
+    dns: deny
+    raw_sockets: deny
+  encrypted_hostname_unverifiable: deny
+  deny_cidrs:
+    - 127.0.0.0/8
+    - 127.0.0.0/16
+  allow:
+    - cidr: 203.0.113.0/24
+      ports: [443]
+      protocol: tcp
+    - cidr: 203.0.113.128/25
+      ports: [443, 8443]
+      protocol: tcp
+"#,
+    );
+
+    let warnings = policy.tcp.validation_warnings();
+
+    assert!(warnings
+        .iter()
+        .all(|finding| finding.severity == Severity::Warning));
+    assert!(warnings
+        .iter()
+        .any(|finding| finding.message.contains("denied CIDRs")));
+    assert!(warnings
+        .iter()
+        .any(|finding| finding.message.contains("allow CIDRs")));
+}
+
+#[test]
 fn source_validation_rejects_allow_cidr_inside_denied_cidr() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: denied-cidr-allow
 tcp:
@@ -509,6 +593,7 @@ fn parses_binary_byte_sizes() {
     let policy = parse_source(
         r#"
 version: 1
+kind: tcp-policy
 metadata:
   name: byte-size
 tcp:
@@ -547,8 +632,15 @@ fn explains_generated_lock() {
     assert_eq!(explanation.direct.udp, "deny");
     assert_eq!(explanation.direct.dns, "deny");
     assert_eq!(explanation.direct.raw_sockets, "deny");
+    assert_eq!(explanation.encrypted_hostname_unverifiable, "deny");
     assert_eq!(explanation.allow_count, 5);
     assert_eq!(explanation.deny_cidr_count, 10);
+    assert!(explanation.digest.is_some());
+    assert_eq!(
+        explanation.source.root,
+        repo_root().join("tcp.compound.yaml")
+    );
+    assert!(explanation.validation_findings.is_empty());
 
     let hosts: BTreeSet<_> = explanation
         .allow
@@ -595,6 +687,7 @@ fn evaluator_requires_hostname_for_hostname_rules() {
     let lock: TcpLockDocument = parse_lock(
         r#"
 version: 1
+kind: tcp-lock
 metadata:
   name: hostname-required
 source:
@@ -635,6 +728,7 @@ fn evaluator_allows_direct_ip_only_through_cidr_rule() {
     let lock: TcpLockDocument = parse_lock(
         r#"
 version: 1
+kind: tcp-lock
 metadata:
   name: cidr-direct-ip
 source:
@@ -685,6 +779,7 @@ fn lock_validation_rejects_incomplete_tcp_lock() {
     let lock = parse_lock(
         r#"
 version: 1
+kind: tcp-lock
 metadata:
   name: incomplete-lock
 source:

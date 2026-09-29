@@ -2,6 +2,7 @@ use compound_fs::{
     explain_lock, lock_policy_from_path, FsAccess, FsDefault, FsLockDocument, FsLockError,
     FsLockOptions, FsSourceDocument, InheritedFileDescriptors,
 };
+use compound_policy::Severity;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -157,6 +158,12 @@ fn explains_generated_lock() {
     assert_eq!(explanation.inherited_file_descriptors, "deny");
     assert_eq!(explanation.path_count, 15);
     assert_eq!(explanation.paths.len(), 15);
+    assert!(explanation.digest.is_some());
+    assert_eq!(
+        explanation.source.root,
+        repo_root().join("fs.compound.yaml")
+    );
+    assert!(explanation.validation_findings.is_empty());
 
     let proc_self = explanation
         .paths
@@ -189,10 +196,71 @@ fn explains_generated_lock() {
 }
 
 #[test]
+fn root_policy_validation_rejects_missing_kind() {
+    let policy = parse_source(
+        r#"
+version: 1
+metadata:
+  name: missing-kind
+policy:
+  default: deny
+  paths:
+    - path: /workspace
+      access: [read]
+"#,
+    );
+
+    let errors = policy
+        .validate_root_policy()
+        .expect_err("root policy should require kind");
+
+    assert!(errors.iter().any(|error| {
+        error.field == "kind" && error.message.contains("document kind is required")
+    }));
+}
+
+#[test]
+fn root_policy_validation_warns_about_risky_grants() {
+    let policy = parse_source(
+        r#"
+version: 1
+kind: fs-policy
+metadata:
+  name: risky-grants
+policy:
+  default: deny
+  paths:
+    - path: /tmp
+      access: [read, list, write, create, execute]
+    - path: /etc
+      access: [read, list, write]
+    - path: /proc
+      access: [read, list, write]
+"#,
+    );
+
+    let warnings = policy.policy.validation_warnings();
+
+    assert!(warnings
+        .iter()
+        .all(|finding| finding.severity == Severity::Warning));
+    assert!(warnings
+        .iter()
+        .any(|finding| finding.message.contains("executable and writable")));
+    assert!(warnings
+        .iter()
+        .any(|finding| finding.message.contains("broad host path")));
+    assert!(warnings
+        .iter()
+        .any(|finding| finding.message.contains("runtime/system path")));
+}
+
+#[test]
 fn root_policy_validation_rejects_inherited_default() {
     let policy = parse_source(
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: invalid-root
 policy:
@@ -220,6 +288,7 @@ fn fragment_validation_rejects_deny_default() {
     let fragment = parse_source(
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: invalid-fragment
 policy:
@@ -247,6 +316,7 @@ fn root_policy_validation_rejects_non_absolute_paths() {
     let policy = parse_source(
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: relative-path
 policy:
@@ -274,6 +344,7 @@ fn root_policy_validation_rejects_duplicate_paths() {
     let policy = parse_source(
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: duplicate-paths
 policy:
@@ -306,6 +377,7 @@ fn lock_generation_rejects_root_with_inherited_default() {
         "fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: invalid-root-lock
 policy:
@@ -320,7 +392,7 @@ policy:
         .expect_err("lock generation should reject inherited root default");
 
     assert!(
-        matches!(error, FsLockError::InvalidPolicy(message) if message.contains("root filesystem policy must set policy.default: deny"))
+        matches!(error, FsLockError::InvalidPolicy(message) if message.contains("complete filesystem policies must set default: deny"))
     );
 }
 
@@ -332,6 +404,7 @@ fn lock_generation_rejects_fragment_with_deny_default() {
         "fragment.fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: invalid-fragment-lock
 policy:
@@ -346,6 +419,7 @@ policy:
         "fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: root
 include:
@@ -362,9 +436,13 @@ policy:
     let error = lock_policy_from_path(&FsLockOptions::new(root))
         .expect_err("lock generation should reject deny-default fragment");
 
-    assert!(
-        matches!(error, FsLockError::InvalidPolicy(message) if message.contains("must set policy.default: inherit"))
-    );
+    match error {
+        FsLockError::InvalidPolicy(message) => {
+            assert!(message.contains("policy.default"), "{message}");
+            assert!(message.contains("inherit"), "{message}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]
@@ -375,6 +453,7 @@ fn lock_generation_rejects_conflicting_include_and_root_paths() {
         "fragment.fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: conflicting-fragment
 policy:
@@ -389,6 +468,7 @@ policy:
         "fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: conflicting-root
 include:
@@ -418,6 +498,7 @@ fn lock_generation_allows_identical_include_and_root_paths_once() {
         "fragment.fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: duplicate-fragment
 policy:
@@ -432,6 +513,7 @@ policy:
         "fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: duplicate-root
 include:
@@ -463,6 +545,7 @@ fn lock_generation_rejects_non_absolute_include_paths() {
         "fragment.fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: relative-fragment
 policy:
@@ -477,6 +560,7 @@ policy:
         "fs.compound.yaml",
         r#"
 version: 1
+kind: fs-policy
 metadata:
   name: root
 include:

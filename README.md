@@ -14,16 +14,16 @@ Compound is being built around four user-facing pieces:
   Landlock with deny-by-default file access.
 - **TCP egress policy**: declare allowed destinations in `tcp.compound.yaml` and
   generate a reviewed `tcp-lock.compound.yaml`. The schema, lock generation,
-  evaluator, and explicit gateway test harness exist today.
+  evaluator, explicit gateway harness, and initial transparent gateway handler
+  exist today.
 - **Runtime launcher**: `compound exec --fs-lock ... -- <command...>` applies
   filesystem confinement, sanitizes dangerous environment variables, closes
   inherited file descriptors by default, sets `no_new_privs`, and fails closed
   outside Linux.
-- **Transparent network enforcement planning**: `compoundd` now validates
-  `tcp-lock` files and builds a namespace/veth/nftables/TPROXY command plan
-  that routes jailed TCP through a trusted gateway while dropping denied
-  transports and CIDRs. The plan is tested and inspectable; the privileged
-  end-to-end process lifecycle is still being built.
+- **Transparent network enforcement**: `compoundd` validates `tcp-lock` files,
+  builds a namespace/veth/nftables/TPROXY setup, and can run the trusted
+  gateway. `compound exec --tcp` wires that setup to the launched process on
+  Linux; the integrated launcher still needs privileged CI proof.
 
 Current tested claim:
 
@@ -33,10 +33,9 @@ Current tested claim:
 
 Not yet claimed:
 
-> Compound does not yet provide a fully integrated `compound exec --tcp`
-> experience. `compoundd` can plan/apply the network boundary, but automatic
-> privileged setup, gateway lifecycle management, and workload launch are still
-> under construction.
+> Compound has an initial `compound exec --tcp` path, but the integrated
+> launcher has not yet been proven in privileged Linux CI. Treat the network
+> confinement claim as experimental until that end-to-end suite passes.
 
 ## Commands
 
@@ -99,6 +98,17 @@ cargo run -p compoundd -- cleanup \
   --dry-run
 ```
 
+Run a command with filesystem and TCP enforcement on Linux:
+
+```sh
+cargo run -p compound-cli -- exec \
+  --fs-lock fs-lock.compound.yaml \
+  --tcp-lock tcp-lock.compound.yaml \
+  --jail-id demo \
+  -- \
+  /bin/sh -c 'curl http://198.51.100.10'
+```
+
 Run a command with filesystem enforcement on Linux:
 
 ```sh
@@ -107,6 +117,20 @@ cargo run -p compound-cli -- exec \
   --workdir /workspace \
   -- \
   /bin/sh -c 'pwd'
+```
+
+Run with an explicit Linux target identity and a minimal environment:
+
+```sh
+cargo run -p compound-cli -- exec \
+  --fs-lock fs-lock.compound.yaml \
+  --uid 1000 \
+  --gid 1000 \
+  --clear-env \
+  --keep-env PATH \
+  --keep-env HOME \
+  -- \
+  /bin/sh -c 'id && env'
 ```
 
 On macOS and other non-Linux platforms, `compound exec` fails closed before
@@ -197,11 +221,17 @@ Execution runtime for `compound exec`:
 - fails closed on non-Linux
 - sets `no_new_privs`
 - sanitizes dangerous dynamic-loading and startup environment variables
+- can clear the inherited environment and restore only explicitly named
+  variables
 - closes inherited file descriptors by default
 - applies Landlock before spawning the target process
+- can drop the child process to an explicit `--uid` and/or `--gid` on Linux
+- can start `compoundd` TCP setup/gateway for `--tcp-lock`, open the resulting
+  network namespace before Landlock, and enter it in the child before target
+  exec on Linux
 
-The runtime does not yet implement UID/GID changes, capability dropping,
-seccomp, cgroups, mount isolation, or structured audit logs.
+The runtime does not yet implement capability dropping, seccomp, cgroups,
+mount/proc isolation, or structured audit logs.
 
 ### `compound-tcp`
 
@@ -218,7 +248,7 @@ TCP policy model and gateway logic:
   `503 Service Unavailable`; denied non-HTTP receives no policy-specific bytes.
 
 This crate does not itself create the transparent network boundary. It is the
-policy/gateway brain used by `compoundd` and future runtime wiring.
+policy/gateway brain used by `compoundd` and the runtime.
 
 ### `compoundd`
 
@@ -233,13 +263,13 @@ Privileged network setup planning:
   - UDP, ICMP, DNS, and denied-CIDR drops
   - TCP TPROXY interception to the gateway
   - policy routing for marked transparent proxy traffic
-- supports `plan`, `apply --dry-run`, and `cleanup --dry-run`
+- supports `plan`, `apply`, `cleanup`, and foreground `gateway`
 - derives cleanup commands for policy routes, nftables tables, veth devices,
   and namespaces
 
-This is not yet a full daemon lifecycle. The gateway process manager, privilege
-model, idempotent apply/cleanup behavior, and `compound exec --tcp` integration
-remain open.
+This is not yet a full daemon lifecycle. Idempotent apply/cleanup behavior,
+privilege separation, structured inspect/debug APIs, and stronger gateway
+identity tracking remain open.
 
 ### `compound-cli`
 
@@ -250,12 +280,11 @@ compound fs lock [--policy fs.compound.yaml] [--output fs-lock.compound.yaml] [-
 compound fs explain [--policy fs-lock.compound.yaml]
 compound tcp lock [--policy tcp.compound.yaml] [--output tcp-lock.compound.yaml] [--check]
 compound tcp explain [--policy tcp-lock.compound.yaml]
-compound exec [--fs-lock fs-lock.compound.yaml] [--workdir PATH] -- <command...>
+compound exec [--fs-lock fs-lock.compound.yaml] [--tcp | --tcp-lock tcp-lock.compound.yaml] [--jail-id ID] [--workdir PATH] [--uid UID] [--gid GID] [--clear-env] [--keep-env NAME]... -- <command...>
 ```
 
-`fs explain` and `tcp explain` validate lock semantics before printing.
-`compound exec --tcp` and `--tcp-lock` currently fail with an explicit
-unsupported error.
+`fs explain` and `tcp explain` validate lock semantics before printing. On
+non-Linux hosts, `compound exec` fails closed before running the target.
 
 ## Tests
 
@@ -284,17 +313,16 @@ Important test surfaces:
   `COMPOUND_RUN_PRIVILEGED_NET_TESTS=1`.
 
 GitHub Actions runs both the normal Rust workspace suite and a Linux enforcement
-job that explicitly exercises the Landlock tests.
+job that explicitly exercises the Landlock and privileged TPROXY tests.
 
 ## Roadmap
 
 The live implementation checklist is in `TODO.md`. The largest remaining work is:
 
-- `compoundd` privileged lifecycle and cleanup
-- `compound exec --tcp` integration
+- privileged Linux CI proof for `compound exec --tcp`
+- stronger `compoundd` lifecycle and cleanup idempotency
 - DNS confinement and gateway-controlled resolution
-- richer runtime hardening: capabilities, UID/GID, seccomp, cgroups, mount
-  isolation
+- richer runtime hardening: capabilities, seccomp, cgroups, mount isolation
 - structured audit logs outside jailed write authority
 - deeper filesystem edge-case semantics for rename/link/socket/FIFO/device
   behavior

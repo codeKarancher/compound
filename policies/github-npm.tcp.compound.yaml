@@ -1,6 +1,7 @@
 # Reusable Compound TCP policy fragment for GitHub and npm.
 
 version: 1
+kind: tcp-policy
 
 metadata:
   name: github-npm-tcp

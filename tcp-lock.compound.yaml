@@ -2,6 +2,7 @@
 # Produced by resolving tcp.compound.yaml includes into one TCP policy.
 
 version: 1
+kind: tcp-lock
 
 metadata:
   name: github-coding-agent-tcp

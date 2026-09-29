@@ -1,5 +1,6 @@
 use compound_policy::{
-    AuditConfig, Digest, DocumentKind, Include, LockSource, Metadata, ValidationReport,
+    AuditConfig, Digest, DocumentKind, Include, LockSource, Metadata, ValidationFinding,
+    ValidationReport,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -193,6 +194,56 @@ impl TcpPolicyBody {
                 }
             }
         }
+    }
+
+    pub fn validation_warnings(&self) -> Vec<ValidationFinding> {
+        let mut warnings = Vec::new();
+
+        for (left_index, left) in self.deny_cidrs.iter().enumerate() {
+            for right in self.deny_cidrs.iter().skip(left_index + 1) {
+                if cidr_contains_cidr(*left, *right) || cidr_contains_cidr(*right, *left) {
+                    warnings.push(warning(format!(
+                        "denied CIDRs {left} and {right} overlap; the narrower rule is redundant"
+                    )));
+                }
+            }
+        }
+
+        for (left_index, left) in self.allow.iter().enumerate() {
+            let Some(left_cidr) = left.cidr else {
+                continue;
+            };
+            for right in self.allow.iter().skip(left_index + 1) {
+                let Some(right_cidr) = right.cidr else {
+                    continue;
+                };
+
+                if left.protocol == right.protocol
+                    && ports_overlap(&left.ports, &right.ports)
+                    && cidrs_overlap(left_cidr, right_cidr)
+                {
+                    warnings.push(warning(format!(
+                        "allow CIDRs {left_cidr} and {right_cidr} overlap for {:?} on at least one port",
+                        left.protocol
+                    )));
+                }
+            }
+        }
+
+        for rule in &self.allow {
+            if rule.cidr.is_some() && rule.protocol == TcpProtocol::Tls {
+                warnings.push(warning(
+                    "TLS CIDR allow rule cannot authenticate a hostname without SNI/hostname verification",
+                ));
+            }
+            if rule.host.is_some() && rule.protocol == TcpProtocol::Tcp {
+                warnings.push(warning(
+                    "plain TCP hostname allow rule depends on gateway-controlled DNS identity",
+                ));
+            }
+        }
+
+        warnings
     }
 }
 
@@ -635,11 +686,18 @@ fn validate_kind(
     expected: DocumentKind,
     errors: &mut Vec<TcpValidationError>,
 ) {
-    if matches!(actual, Some(actual) if actual != expected) {
-        errors.push(TcpValidationError::new(
+    match actual {
+        Some(actual) if actual == expected => {}
+        Some(actual) => {
+            errors.push(TcpValidationError::new(
+                "kind",
+                format!("expected document kind {expected:?}, got {actual:?}"),
+            ));
+        }
+        None => errors.push(TcpValidationError::new(
             "kind",
-            format!("expected document kind {expected:?}, got {actual:?}"),
-        ));
+            format!("document kind is required: {expected:?}"),
+        )),
     }
 }
 
@@ -696,4 +754,19 @@ fn cidr_contains_cidr(container: Cidr, candidate: Cidr) -> bool {
         }
         _ => false,
     }
+}
+
+fn warning(message: impl Into<String>) -> ValidationFinding {
+    ValidationFinding {
+        severity: compound_policy::Severity::Warning,
+        message: message.into(),
+    }
+}
+
+fn ports_overlap(left: &PortList, right: &PortList) -> bool {
+    left.0.iter().any(|port| right.contains(*port))
+}
+
+fn cidrs_overlap(left: Cidr, right: Cidr) -> bool {
+    cidr_contains_cidr(left, right) || cidr_contains_cidr(right, left)
 }

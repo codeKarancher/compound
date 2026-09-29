@@ -24,11 +24,14 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
     limitation
   - rename target-create behavior is documented as a Landlock semantics nuance
 - TCP policy/schema/lock/explain/evaluator APIs exist.
-- TCP gateway code is currently an explicit CONNECT-style test harness.
+- TCP gateway code includes both an explicit CONNECT-style harness and an
+  initial transparent handler for original-destination TCP.
 - `compoundd` can build and dry-run a namespace/veth/nftables/TPROXY network
-  setup plan from a `tcp-lock`.
-- `compound exec --tcp` is intentionally rejected until privileged `compoundd`
-  lifecycle management and workload launch are wired together.
+  setup plan from a `tcp-lock`, and has a foreground `gateway` command.
+- `compound exec --tcp` is wired to run `compoundd cleanup`, `compoundd apply`,
+  launch `compoundd gateway`, enter the configured network namespace in the
+  child, apply Landlock, run the target, and clean up afterward. This still
+  needs privileged Linux CI coverage for the integrated launcher path.
 
 ## Phase 0: Policy And CLI Foundation
 
@@ -48,22 +51,22 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   the proposal.
 - [ ] Add policy validation warnings/errors for paths that do not exist under
   the target root filesystem.
-- [ ] Add validation warnings for risky grants:
+- [x] Add validation warnings for risky grants:
   - writable executable directories
   - broad write grants to `/`, `/usr`, `/bin`, `/etc`, `/home`
   - executable writable temp/workspace paths
   - runtime paths granted broader access than needed
 - [x] Add validation for duplicate TCP allow rule identities.
 - [x] Add validation for TCP CIDR allow rules covered by denied CIDRs.
-- [ ] Add validation for broader ambiguous or overlapping TCP rules.
+- [x] Add validation warnings for overlapping TCP allow/deny CIDRs.
 - [ ] Add validation for TCP hostname allow rules that resolve to denied CIDRs.
 - [x] Validate lock semantics before `fs explain` and `tcp explain`.
-- [ ] Improve `fs explain` and `tcp explain`.
-  - Show source/include provenance.
-  - Show effective lock digest.
-  - Show warnings and compatibility notes.
+- [x] Improve `fs explain` and `tcp explain` with digest, source/include
+  provenance, and validation warnings.
+- [ ] Improve `fs explain` and `tcp explain` with lower-level enforcement notes.
   - Show lower-level Landlock rights or TCP enforcement implications.
-- [ ] Decide whether `kind` should be mandatory in source and lock files.
+- [x] Decide whether `kind` should be mandatory in source and lock files.
+  - v1 now requires explicit `kind` on source and lock documents.
 - [ ] Add richer README usage docs and be explicit about what is implemented
   versus planned.
 
@@ -85,24 +88,42 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
     character device, and other make rights.
   - Device/socket creation should remain denied unless there is an explicit
     future grant type.
-- [ ] Add UID/GID execution support.
+- [x] Add initial UID/GID execution support.
   - CLI proposal includes `--uid` and `--gid`.
-  - Drop privileges before target execution.
-  - Ensure supplementary groups are handled.
+  - Runtime applies requested identity in the child process before target exec.
+  - Supplementary groups are cleared before `setgid`/`setuid`.
+  - Still needs privileged Linux CI coverage that runs as root, drops to a
+    non-root UID/GID, and verifies the target cannot regain elevated identity.
 - [ ] Drop Linux capabilities before target execution.
   - Especially deny `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`,
     `CAP_DAC_OVERRIDE`, `CAP_DAC_READ_SEARCH`, `CAP_BPF`, and similar escape
     relevant capabilities.
+  - Start with fail-closed capability clearing for permitted/effective/
+    inheritable/ambient sets, then bounding-set drops where the launcher has
+    `CAP_SETPCAP`.
+  - Add tests that inspect `/proc/self/status` capability masks inside the
+    target.
 - [ ] Add seccomp profile support.
   - Start conservative and configurable.
   - Candidate denied syscall families: mount, namespace creation, ptrace, BPF,
     keyring, raw socket related calls, module loading, privileged device ops.
+  - Initial profile should be denylist-oriented only if we can prove developer
+    tool compatibility; otherwise prefer named profiles with explicit docs.
 - [ ] Add cgroups v2 controls.
   - CPU
   - memory
   - PID count
   - I/O
   - wall-clock timeout
+  - Decide whether `compoundd` owns cgroup creation for both FS-only and
+    TCP-enabled executions, or whether FS-only `compound exec` can manage a
+    delegated cgroup directly.
+- [ ] Add mount and `/proc` isolation.
+  - Unshare mount namespace before target execution.
+  - Mount a minimal procfs view rather than relying on broad host `/proc`.
+  - Hide host process table and sensitive kernel interfaces.
+  - Decide whether this belongs in `compound-runtime` for FS-only execution or
+    in `compoundd` once user/network namespaces are coordinated.
 - [ ] Add structured local audit logging for `compound exec`.
   - process start
   - policy digest
@@ -115,7 +136,12 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 - [ ] Decide how to handle filesystem denial observability.
   - Landlock does not automatically give high-level path denial events.
   - Consider eBPF/auditd integration later, but do not block v0 on it.
-- [ ] Expand environment sanitization.
+- [x] Add opt-in minimal environment execution.
+  - `compound exec --clear-env --keep-env NAME` clears inherited environment
+    and restores only explicitly named variables.
+  - Dangerous dynamic-loading/startup variables remain removed even if listed in
+    `--keep-env`.
+- [ ] Expand default environment sanitization.
   - Package manager config/env vars
   - Git config/env vars that redirect credential helpers or hooks
   - SSH agent variables
@@ -187,8 +213,9 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - deletes the jail nftables table
   - deletes the host veth and network namespace
 - [ ] Implement full `compoundd` daemon lifecycle.
-  - starts or coordinates the trusted gateway
-  - makes setup and cleanup idempotent across partial failures
+  - [x] exposes a foreground trusted gateway command
+  - [x] runtime starts and stops the gateway for `compound exec --tcp`
+  - [ ] make setup and cleanup idempotent across partial failures
   - owns privilege separation and daemon API
   - exposes inspect/debug output for routes and firewall rules
 - [x] Decide initial transparent interception mechanism.
@@ -211,14 +238,23 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 - [ ] Prove TPROXY-redirected original destination recovery against the real
   transparent gateway path.
 - [ ] Implement per-jail gateway lifecycle.
-  - bind listener outside jailed privilege domain
-  - associate gateway instance with immutable policy digest
-  - prevent jailed process from signalling or reconfiguring gateway
-- [ ] Implement real `compound exec --tcp tcp-lock.compound.yaml`.
-  - Must fail closed if `compoundd` is unavailable.
-  - Must fail closed if namespace setup fails.
+  - [x] bind listener outside jailed privilege domain
+  - [x] start a gateway instance per `compound exec --tcp` jail id
+  - [ ] associate gateway instance with immutable policy digest in structured
+    runtime/daemon state
+  - [ ] prevent jailed process from signalling or reconfiguring gateway via
+    explicit privilege/capability tests
+- [x] Implement initial `compound exec --tcp tcp-lock.compound.yaml`.
+  - Fails closed if `compoundd` is unavailable.
+  - Fails closed if namespace setup fails.
+  - Runs FS and TCP enforcement together for the same target process tree.
+  - Opens the network namespace before Landlock, then enters it in the child
+    before UID/GID drops and target exec.
+  - Still needs privileged Linux CI proof for the end-to-end launcher path.
+- [ ] Prove `compound exec --tcp` direct bypass denial in privileged Linux CI.
   - Must fail closed if direct DNS/UDP/raw/direct TCP cannot be denied.
-  - Must run FS and TCP enforcement together for the same process tree.
+  - Must verify the child process really enters the generated namespace.
+  - Must verify cleanup runs after target exit and after setup/gateway failures.
 - [ ] Deny direct TCP outside the transparent gateway.
 - [ ] Deny UDP by default.
   - Direct DNS over UDP/53
@@ -270,14 +306,15 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 
 ## Phase 2: TCP Adversarial Tests
 
-- [ ] Test direct TCP bypass attempts from common tools.
+- [x] Test direct TCP bypass attempts from common tools where available in the
+  privileged Linux runner.
   - `curl`
   - Python socket
   - Node net/http/https
   - Go static binary
   - Rust static-ish test binary
   - netcat if available
-- [ ] Test direct IP public destination denial.
+- [x] Test direct IP public destination denial.
 - [ ] Test private network denial.
   - RFC1918
   - loopback
@@ -290,10 +327,10 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
   - DoT
   - DoH
   - custom resolver IP
-- [ ] Test UDP and QUIC denial.
+- [x] Test UDP and QUIC denial.
   - UDP/443
   - arbitrary UDP socket
-- [ ] Test ICMP/raw socket denial.
+- [x] Test ICMP/raw socket denial for unprivileged jailed probes.
 - [ ] Test hostname/SNI mismatch denial.
 - [ ] Test missing SNI denial for TLS hostname policy.
 - [ ] Test DNS rebinding.
@@ -303,10 +340,21 @@ current scaffold to the security claim in `compound-technical-proposal.md`.
 - [ ] Test upload limit enforcement through the real transparent path.
 - [ ] Test connection flood/limit enforcement.
 - [ ] Test long-lived connection timeout.
-- [ ] Test every allowed network path emits trusted audit events.
-- [ ] Test denied attempts emit trusted audit events.
-- [ ] Test jailed process cannot alter routing/firewall rules.
-- [ ] Test jailed process cannot reach gateway management/control interfaces.
+- [x] Test every allowed network path emits trusted audit events.
+- [x] Test denied gateway-level attempts emit trusted audit events.
+- [x] Test jailed process cannot alter routing/firewall rules as an
+  unprivileged workload.
+- [x] Test jailed process cannot reach gateway management/control interfaces.
+
+Remaining adversarial TCP coverage notes:
+
+- IPv6 network confinement is not implemented in the TPROXY plan yet, so IPv6
+  private/link-local/ULA tests remain open.
+- DoT/DoH are not separately covered yet; DoH likely belongs with hostname/DNS
+  policy once gateway-controlled DNS exists.
+- Raw socket coverage currently verifies the expected unprivileged workload
+  behavior. It should be revalidated after UID/GID and capability dropping are
+  wired into `compound exec --tcp`.
 
 ## Phase 3: Higher-Level Controls
 

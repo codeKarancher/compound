@@ -1,4 +1,5 @@
 use compound_fs::{explain_lock as explain_fs_lock, FsLockDocument, FsLockOptions};
+use compound_policy::{Severity, ValidationFinding};
 use compound_runtime::ExecOptions;
 use compound_tcp::{explain_lock as explain_tcp_lock, TcpLockDocument, TcpLockOptions};
 use std::{
@@ -93,7 +94,13 @@ impl Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecCommand {
     pub fs_lock: PathBuf,
+    pub tcp_lock: Option<PathBuf>,
+    pub jail_id: String,
     pub workdir: Option<PathBuf>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub clear_environment: bool,
+    pub keep_environment: Vec<OsString>,
     pub command: Vec<OsString>,
 }
 
@@ -160,7 +167,13 @@ fn parse_explain_args(mut args: Args, default_policy: &str) -> Result<ExplainCom
 fn parse_exec_args(mut args: Args) -> Result<ExecCommand, CliError> {
     let mut command = ExecCommand {
         fs_lock: PathBuf::from(DEFAULT_FS_LOCK),
+        tcp_lock: None,
+        jail_id: "default".to_owned(),
         workdir: None,
+        uid: None,
+        gid: None,
+        clear_environment: false,
+        keep_environment: Vec::new(),
         command: Vec::new(),
     };
 
@@ -175,12 +188,20 @@ fn parse_exec_args(mut args: Args) -> Result<ExecCommand, CliError> {
         })?;
         match arg.as_str() {
             "--fs-lock" => command.fs_lock = args.required_path("--fs-lock")?,
-            "--workdir" => command.workdir = Some(args.required_path("--workdir")?),
-            "--tcp" | "--tcp-lock" => {
-                return Err(CliError::Unsupported(
-                    "TCP enforcement for `compound exec` requires compoundd/gateway and is not implemented yet".to_owned(),
-                ));
+            "--tcp" => command.tcp_lock = Some(PathBuf::from(DEFAULT_TCP_LOCK)),
+            "--tcp-lock" => command.tcp_lock = Some(args.required_path("--tcp-lock")?),
+            "--jail-id" => {
+                command.jail_id = args.next_string()?.ok_or_else(|| {
+                    CliError::InvalidArguments("missing value for `--jail-id`".to_owned())
+                })?
             }
+            "--workdir" => command.workdir = Some(args.required_path("--workdir")?),
+            "--uid" => command.uid = Some(args.required_u32("--uid")?),
+            "--gid" => command.gid = Some(args.required_u32("--gid")?),
+            "--clear-env" => command.clear_environment = true,
+            "--keep-env" => command
+                .keep_environment
+                .push(args.required_os("--keep-env")?),
             "-h" | "--help" => return Err(CliError::Help(usage())),
             _ => {
                 return Err(CliError::InvalidArguments(format!(
@@ -202,7 +223,13 @@ fn parse_exec_args(mut args: Args) -> Result<ExecCommand, CliError> {
 fn exec(command: &ExecCommand) -> Result<i32, CliError> {
     let options = ExecOptions {
         fs_lock: command.fs_lock.clone(),
+        tcp_lock: command.tcp_lock.clone(),
+        jail_id: command.jail_id.clone(),
         workdir: command.workdir.clone(),
+        uid: command.uid,
+        gid: command.gid,
+        clear_environment: command.clear_environment,
+        keep_environment: command.keep_environment.clone(),
         command: command.command.clone(),
     };
     let status = compound_runtime::exec(&options)?;
@@ -231,6 +258,19 @@ fn fs_explain<W: Write>(command: &ExplainCommand, writer: &mut W) -> Result<i32,
     let explanation = explain_fs_lock(&lock);
 
     writeln!(writer, "filesystem policy:")?;
+    if let Some(digest) = explanation.digest {
+        writeln!(writer, "  digest: {digest}")?;
+    }
+    writeln!(
+        writer,
+        "  source.root: {}",
+        explanation.source.root.display()
+    )?;
+    writeln!(
+        writer,
+        "  source.includes: {}",
+        explanation.source.includes.len()
+    )?;
     writeln!(writer, "  default: {}", explanation.default)?;
     writeln!(
         writer,
@@ -238,12 +278,17 @@ fn fs_explain<W: Write>(command: &ExplainCommand, writer: &mut W) -> Result<i32,
         explanation.inherited_file_descriptors
     )?;
     writeln!(writer, "  paths: {}", explanation.path_count)?;
+    write_validation_findings(writer, &explanation.validation_findings)?;
     for path in explanation.paths {
         writeln!(
             writer,
-            "    {}: {}",
+            "    {}: {}{}",
             path.path.display(),
-            format_debug_set(&path.access)
+            format_debug_set(&path.access),
+            path.source
+                .as_ref()
+                .map(|source| format!(" (from {})", source.display()))
+                .unwrap_or_default()
         )?;
     }
 
@@ -272,6 +317,19 @@ fn tcp_explain<W: Write>(command: &ExplainCommand, writer: &mut W) -> Result<i32
     let explanation = explain_tcp_lock(&lock);
 
     writeln!(writer, "TCP policy:")?;
+    if let Some(digest) = explanation.digest {
+        writeln!(writer, "  digest: {digest}")?;
+    }
+    writeln!(
+        writer,
+        "  source.root: {}",
+        explanation.source.root.display()
+    )?;
+    writeln!(
+        writer,
+        "  source.includes: {}",
+        explanation.source.includes.len()
+    )?;
     writeln!(writer, "  default: {}", explanation.default)?;
     writeln!(writer, "  direct.tcp: {}", explanation.direct.tcp)?;
     writeln!(writer, "  direct.udp: {}", explanation.direct.udp)?;
@@ -281,13 +339,25 @@ fn tcp_explain<W: Write>(command: &ExplainCommand, writer: &mut W) -> Result<i32
         "  direct.raw_sockets: {}",
         explanation.direct.raw_sockets
     )?;
+    writeln!(
+        writer,
+        "  encrypted_hostname_unverifiable: {}",
+        explanation.encrypted_hostname_unverifiable
+    )?;
     writeln!(writer, "  deny_cidrs: {}", explanation.deny_cidr_count)?;
     writeln!(writer, "  allow: {}", explanation.allow_count)?;
+    write_validation_findings(writer, &explanation.validation_findings)?;
     for rule in explanation.allow {
         writeln!(
             writer,
-            "    {} {:?}: {}",
-            rule.host, rule.ports, rule.protocol
+            "    {} {:?}: {}{}",
+            rule.host,
+            rule.ports,
+            rule.protocol,
+            rule.source
+                .as_ref()
+                .map(|source| format!(" (from {})", source.display()))
+                .unwrap_or_default()
         )?;
     }
 
@@ -323,6 +393,25 @@ fn format_debug_set<T: std::fmt::Debug>(value: &T) -> String {
     format!("{value:?}").to_ascii_lowercase()
 }
 
+fn write_validation_findings<W: Write>(
+    writer: &mut W,
+    findings: &[ValidationFinding],
+) -> Result<(), CliError> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(writer, "  validation:")?;
+    for finding in findings {
+        let severity = match finding.severity {
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        };
+        writeln!(writer, "    {severity}: {}", finding.message)?;
+    }
+    Ok(())
+}
+
 fn usage() -> String {
     [
         "Usage:",
@@ -330,7 +419,7 @@ fn usage() -> String {
         "  compound fs explain [--policy fs-lock.compound.yaml]",
         "  compound tcp lock [--policy tcp.compound.yaml] [--output tcp-lock.compound.yaml] [--check]",
         "  compound tcp explain [--policy tcp-lock.compound.yaml]",
-        "  compound exec [--fs-lock fs-lock.compound.yaml] [--workdir PATH] -- <command...>",
+        "  compound exec [--fs-lock fs-lock.compound.yaml] [--tcp | --tcp-lock tcp-lock.compound.yaml] [--jail-id ID] [--workdir PATH] [--uid UID] [--gid GID] [--clear-env] [--keep-env NAME]... -- <command...>",
     ]
     .join("\n")
 }
@@ -373,6 +462,20 @@ impl Args {
         self.next_string()?
             .map(PathBuf::from)
             .ok_or_else(|| CliError::InvalidArguments(format!("missing value for `{flag}`")))
+    }
+
+    fn required_os(&mut self, flag: &str) -> Result<OsString, CliError> {
+        self.next_os()
+            .ok_or_else(|| CliError::InvalidArguments(format!("missing value for `{flag}`")))
+    }
+
+    fn required_u32(&mut self, flag: &str) -> Result<u32, CliError> {
+        let value = self
+            .next_string()?
+            .ok_or_else(|| CliError::InvalidArguments(format!("missing value for `{flag}`")))?;
+        value.parse().map_err(|_| {
+            CliError::InvalidArguments(format!("invalid integer for `{flag}`: {value}"))
+        })
     }
 }
 
@@ -471,7 +574,13 @@ mod tests {
             parse(&["exec", "--", "echo", "hi"]),
             Command::Exec(ExecCommand {
                 fs_lock: PathBuf::from(DEFAULT_FS_LOCK),
+                tcp_lock: None,
+                jail_id: "default".to_owned(),
                 workdir: None,
+                uid: None,
+                gid: None,
+                clear_environment: false,
+                keep_environment: Vec::new(),
                 command: vec![OsString::from("echo"), OsString::from("hi")],
             })
         );
@@ -484,18 +593,50 @@ mod tests {
                 "exec",
                 "--fs-lock",
                 "custom-fs-lock.yaml",
+                "--tcp-lock",
+                "custom-tcp-lock.yaml",
+                "--jail-id",
+                "build-42",
                 "--workdir",
                 "/workspace",
+                "--uid",
+                "1000",
+                "--gid",
+                "1001",
+                "--clear-env",
+                "--keep-env",
+                "PATH",
+                "--keep-env",
+                "HOME",
                 "--",
                 "npm",
                 "test",
             ]),
             Command::Exec(ExecCommand {
                 fs_lock: PathBuf::from("custom-fs-lock.yaml"),
+                tcp_lock: Some(PathBuf::from("custom-tcp-lock.yaml")),
+                jail_id: "build-42".to_owned(),
                 workdir: Some(PathBuf::from("/workspace")),
+                uid: Some(1000),
+                gid: Some(1001),
+                clear_environment: true,
+                keep_environment: vec![OsString::from("PATH"), OsString::from("HOME")],
                 command: vec![OsString::from("npm"), OsString::from("test")],
             })
         );
+    }
+
+    #[test]
+    fn rejects_invalid_exec_uid() {
+        let error = Command::parse([
+            OsString::from("exec"),
+            OsString::from("--uid"),
+            OsString::from("nobody"),
+            OsString::from("--"),
+            OsString::from("true"),
+        ])
+        .expect_err("uid should be numeric");
+        assert!(matches!(error, CliError::InvalidArguments(_)));
     }
 
     #[test]
@@ -506,15 +647,51 @@ mod tests {
     }
 
     #[test]
-    fn rejects_tcp_exec_until_gateway_exists() {
-        let error = Command::parse([
-            OsString::from("exec"),
-            OsString::from("--tcp-lock"),
-            OsString::from("tcp-lock.compound.yaml"),
-            OsString::from("--"),
-            OsString::from("true"),
-        ])
-        .expect_err("tcp exec should be unsupported");
-        assert!(matches!(error, CliError::Unsupported(_)));
+    fn parses_tcp_exec_default_lock() {
+        assert_eq!(
+            Command::parse([
+                OsString::from("exec"),
+                OsString::from("--tcp"),
+                OsString::from("--"),
+                OsString::from("true"),
+            ])
+            .expect("parse tcp exec"),
+            Command::Exec(ExecCommand {
+                fs_lock: PathBuf::from(DEFAULT_FS_LOCK),
+                tcp_lock: Some(PathBuf::from(DEFAULT_TCP_LOCK)),
+                jail_id: "default".to_owned(),
+                workdir: None,
+                uid: None,
+                gid: None,
+                clear_environment: false,
+                keep_environment: Vec::new(),
+                command: vec![OsString::from("true")],
+            })
+        );
+    }
+
+    #[test]
+    fn parses_tcp_exec_custom_lock() {
+        assert_eq!(
+            Command::parse([
+                OsString::from("exec"),
+                OsString::from("--tcp-lock"),
+                OsString::from("tcp-lock.compound.yaml"),
+                OsString::from("--"),
+                OsString::from("true"),
+            ])
+            .expect("parse tcp exec"),
+            Command::Exec(ExecCommand {
+                fs_lock: PathBuf::from(DEFAULT_FS_LOCK),
+                tcp_lock: Some(PathBuf::from("tcp-lock.compound.yaml")),
+                jail_id: "default".to_owned(),
+                workdir: None,
+                uid: None,
+                gid: None,
+                clear_environment: false,
+                keep_environment: Vec::new(),
+                command: vec![OsString::from("true")],
+            })
+        );
     }
 }

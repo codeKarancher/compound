@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 compound-fs = { path = "../compound-fs" }
+compound-policy = { path = "../compound-policy" }
 compound-runtime = { path = "../compound-runtime" }
 compound-tcp = { path = "../compound-tcp" }
 serde = { workspace = true }

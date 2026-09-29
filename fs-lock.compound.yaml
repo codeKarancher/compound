@@ -2,6 +2,7 @@
 # Produced by resolving fs.compound.yaml includes into one filesystem policy.
 
 version: 1
+kind: fs-lock
 
 metadata:
   name: github-coding-agent-fs

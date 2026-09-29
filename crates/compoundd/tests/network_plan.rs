@@ -42,7 +42,7 @@ fn network_plan_creates_namespace_veth_and_gateway_path() {
     assert!(rendered.contains("ip netns add compound-agent01"));
     assert!(rendered.contains("ip link add chagent01 type veth peer name cjagent01"));
     assert!(rendered.contains("ip netns exec compound-agent01 ip route add default"));
-    assert!(rendered.contains("compoundd-gateway"));
+    assert!(!rendered.contains("compoundd gateway"));
     assert_eq!(plan.gateway_addr.port(), 15080);
 }
 

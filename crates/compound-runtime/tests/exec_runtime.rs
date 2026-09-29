@@ -1,12 +1,18 @@
-use compound_runtime::{exec, sanitize_environment, ExecOptions, RuntimeError};
+use compound_runtime::{
+    exec, prepare_environment, sanitize_environment, ExecOptions, RuntimeError,
+};
 use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
 };
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -24,7 +30,13 @@ fn temp_dir() -> PathBuf {
 fn exec_rejects_missing_command() {
     let options = ExecOptions {
         fs_lock: repo_root().join("fs-lock.compound.yaml"),
+        tcp_lock: None,
+        jail_id: "default".to_owned(),
         workdir: None,
+        uid: None,
+        gid: None,
+        clear_environment: false,
+        keep_environment: Vec::new(),
         command: Vec::new(),
     };
 
@@ -35,6 +47,7 @@ fn exec_rejects_missing_command() {
 
 #[test]
 fn sanitizer_removes_dangerous_environment_variables() {
+    let _guard = ENV_LOCK.lock().expect("lock environment test");
     std::env::set_var("LD_PRELOAD", "/tmp/inject.so");
     std::env::set_var("PYTHONPATH", "/tmp/python");
     std::env::set_var("NODE_OPTIONS", "--require /tmp/inject.js");
@@ -44,6 +57,41 @@ fn sanitizer_removes_dangerous_environment_variables() {
     assert!(std::env::var_os("LD_PRELOAD").is_none());
     assert!(std::env::var_os("PYTHONPATH").is_none());
     assert!(std::env::var_os("NODE_OPTIONS").is_none());
+}
+
+#[test]
+fn clear_environment_retains_only_requested_safe_variables() {
+    let _guard = ENV_LOCK.lock().expect("lock environment test");
+    let snapshot: Vec<_> = std::env::vars_os().collect();
+    std::env::set_var("COMPOUND_TEST_KEEP", "keep");
+    std::env::set_var("COMPOUND_TEST_DROP", "drop");
+    std::env::set_var("LD_PRELOAD", "/tmp/inject.so");
+
+    let options = ExecOptions {
+        fs_lock: repo_root().join("fs-lock.compound.yaml"),
+        tcp_lock: None,
+        jail_id: "default".to_owned(),
+        workdir: None,
+        uid: None,
+        gid: None,
+        clear_environment: true,
+        keep_environment: vec![
+            OsString::from("COMPOUND_TEST_KEEP"),
+            OsString::from("LD_PRELOAD"),
+        ],
+        command: vec![OsString::from("true")],
+    };
+
+    prepare_environment(&options);
+
+    assert_eq!(std::env::var("COMPOUND_TEST_KEEP").as_deref(), Ok("keep"));
+    assert!(std::env::var_os("COMPOUND_TEST_DROP").is_none());
+    assert!(std::env::var_os("LD_PRELOAD").is_none());
+
+    std::env::vars_os().for_each(|(key, _)| std::env::remove_var(key));
+    for (key, value) in snapshot {
+        std::env::set_var(key, value);
+    }
 }
 
 #[test]
@@ -70,7 +118,13 @@ policy:
 
     let options = ExecOptions {
         fs_lock: lock,
+        tcp_lock: None,
+        jail_id: "default".to_owned(),
         workdir: None,
+        uid: None,
+        gid: None,
+        clear_environment: false,
+        keep_environment: Vec::new(),
         command: vec![
             OsString::from("sh"),
             OsString::from("-c"),
@@ -91,7 +145,13 @@ fn non_linux_exec_fails_closed_before_target_can_run() {
     let marker = dir.join("marker");
     let options = ExecOptions {
         fs_lock: repo_root().join("fs-lock.compound.yaml"),
+        tcp_lock: None,
+        jail_id: "default".to_owned(),
         workdir: None,
+        uid: None,
+        gid: None,
+        clear_environment: false,
+        keep_environment: Vec::new(),
         command: vec![
             OsString::from("sh"),
             OsString::from("-c"),

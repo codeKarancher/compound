@@ -2,6 +2,7 @@
 # This fragment assumes Compound has mounted a procfs view scoped to the jail.
 
 version: 1
+kind: fs-policy
 
 metadata:
   name: proc-minimal

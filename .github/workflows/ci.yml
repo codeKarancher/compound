@@ -71,7 +71,15 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Build workspace binaries
+        run: cargo build --workspace --bins
+
       - name: Run privileged TPROXY integration tests
         env:
           COMPOUND_RUN_PRIVILEGED_NET_TESTS: "1"
         run: sudo -E env "PATH=$PATH" cargo test -p compoundd --test tproxy_adversarial -- --nocapture
+
+      - name: Run privileged compound exec TCP tests
+        env:
+          COMPOUND_RUN_PRIVILEGED_NET_TESTS: "1"
+        run: PATH="$GITHUB_WORKSPACE/target/debug:$PATH" cargo test -p compound-cli --test tcp_exec_privileged -- --nocapture

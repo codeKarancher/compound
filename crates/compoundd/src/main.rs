@@ -1,8 +1,18 @@
+use compound_tcp::{
+    bind_transparent_listener, AuditSink, Gateway, GatewayAuditEvent, MemoryAuditSink,
+    StaticResolver, SystemConnector,
+};
 use compoundd::{
     build_cleanup_plan, build_network_plan, read_tcp_lock, DryRunRunner, NetworkPlanOptions,
     SystemRunner,
 };
-use std::{env, net::Ipv4Addr, path::PathBuf};
+use std::{
+    env,
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::Arc,
+    thread,
+};
 
 fn main() {
     match run() {
@@ -23,6 +33,7 @@ fn run() -> Result<(), String> {
     let mut tcp_lock = PathBuf::from("tcp-lock.compound.yaml");
     let mut options = NetworkPlanOptions::new("default");
     let mut dry_run = command == "plan";
+    let mut listen = None::<SocketAddr>;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -72,6 +83,14 @@ fn run() -> Result<(), String> {
                     .parse()
                     .map_err(|err| format!("invalid --routing-table: {err}"))?;
             }
+            "--listen" => {
+                listen = Some(
+                    args.next()
+                        .ok_or_else(|| "missing --listen value".to_owned())?
+                        .parse::<SocketAddr>()
+                        .map_err(|err| format!("invalid --listen: {err}"))?,
+                );
+            }
             "--dry-run" => dry_run = true,
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unexpected argument `{arg}`\n\n{}", usage())),
@@ -113,7 +132,48 @@ fn run() -> Result<(), String> {
             let mut runner = SystemRunner;
             plan.cleanup(&mut runner).map_err(|error| error.to_string())
         }
+        "gateway" => {
+            let lock = read_tcp_lock(&tcp_lock).map_err(|error| error.to_string())?;
+            let listen = listen.unwrap_or_else(|| options.gateway_addr().into());
+            serve_gateway(lock, listen).map_err(|error| error.to_string())
+        }
         _ => Err(format!("unknown command `{command}`\n\n{}", usage())),
+    }
+}
+
+fn serve_gateway(lock: compound_tcp::TcpLockDocument, listen: SocketAddr) -> Result<(), String> {
+    lock.validate_lock()
+        .map_err(|errors| format!("invalid TCP lock: {errors:?}"))?;
+    let listener = bind_transparent_listener(listen).map_err(|error| error.to_string())?;
+    let gateway = Gateway::new(
+        lock,
+        Arc::new(StaticResolver::default()),
+        Arc::new(SystemConnector),
+        Arc::new(StderrAuditSink {
+            fallback: MemoryAuditSink::default(),
+        }),
+    );
+
+    loop {
+        let (client, _) = listener.accept().map_err(|error| error.to_string())?;
+        let gateway = gateway.clone();
+        thread::spawn(move || {
+            if let Err(error) = gateway.handle_transparent_client(client) {
+                eprintln!("compoundd gateway: {error}");
+            }
+        });
+    }
+}
+
+#[derive(Debug, Default)]
+struct StderrAuditSink {
+    fallback: MemoryAuditSink,
+}
+
+impl AuditSink for StderrAuditSink {
+    fn record(&self, event: GatewayAuditEvent) {
+        eprintln!("compoundd gateway audit: {event:?}");
+        self.fallback.record(event);
     }
 }
 
@@ -123,11 +183,13 @@ fn usage() -> String {
         "  compoundd plan [--tcp-lock tcp-lock.compound.yaml] [--jail-id ID]",
         "  compoundd apply [--tcp-lock tcp-lock.compound.yaml] [--jail-id ID] [--dry-run]",
         "  compoundd cleanup [--jail-id ID] [--dry-run]",
+        "  compoundd gateway [--tcp-lock tcp-lock.compound.yaml] [--listen ADDR:PORT]",
         "",
         "Options:",
         "  --gateway-port PORT",
         "  --host-addr IPv4",
         "  --jail-addr IPv4",
+        "  --listen ADDR:PORT",
         "  --fwmark MARK",
         "  --routing-table TABLE",
     ]
